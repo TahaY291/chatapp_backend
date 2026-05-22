@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
+import authRouter from '../src/routes/auth.routes'
 
 dotenv.config();
 
@@ -17,6 +18,8 @@ app.use(express.urlencoded({ extended: true, limit: "16kb" }));
 app.use(express.static("public"));
 app.use(cookieParser());
 
+
+app.use('/user' , authRouter)
 
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });

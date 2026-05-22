@@ -21,12 +21,7 @@ export const registerSchema = z.object({
         .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
         .regex(/[0-9]/, "Password must contain at least one number")
         .regex(/[^a-zA-Z0-9]/, "Password must contain at least one special character"),
-
-    confirmPassword: z.string(),
-}).refine((data) => data.password === data.confirmPassword, {
-    message: "Passwords do not match",
-    path: ["confirmPassword"],
-});
+})
 
 // ─── Login ────────────────────────────────────────────
 export const loginSchema = z.object({
@@ -64,18 +59,12 @@ export const updateProfileSchema = z.object({
     { message: "At least one field must be provided to update" }
 );
 
-export const verifyOTPSchema = z.object({
-    email: z
-        .string()
-        .email("Invalid email address")
-        .toLowerCase()
-        .trim(),
-
+export const verifyEmailSchema = z.object({
     otp: z
         .string()
         .length(6, "OTP must be exactly 6 digits")
         .regex(/^\d+$/, "OTP must contain only numbers"),
-});
+})
 
 export const forgotPasswordSchema = z.object({
     email: z
@@ -111,9 +100,9 @@ export const resetPasswordSchema = z.object({
     path: ["confirmPassword"],
 });
 
-export type RegisterInput    = z.infer<typeof registerSchema>;
+export type RegisterInput = z.infer<typeof registerSchema>
 export type LoginInput       = z.infer<typeof loginSchema>;
 export type UpdateProfileInput  = z.infer<typeof updateProfileSchema>;
-export type VerifyOTPInput   = z.infer<typeof verifyOTPSchema>;
+export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export type ResetPasswordInput  = z.infer<typeof resetPasswordSchema>;
