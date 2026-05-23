@@ -11,5 +11,5 @@ router.route('/login').post(validate(loginSchema), loginUser)
 router.route('/logout').post(verifyUser, logoutUser)
 router.route('/refreshAccessToken').post(refreshAccessToken)
 router.route('/verifyEmail').post(verifyUser, validate(verifyEmailSchema), verifyEmail)
-router.route('/health').get((req, res)=>(res.json("server is running")))
+
 export default router

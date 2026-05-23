@@ -3,28 +3,132 @@ import dotenv from "dotenv";
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import authRouter from '../src/routes/auth.routes'
+import { Server } from "socket.io";
+import http from 'http'
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+const allowedOrigins =
+    process.env.ALLOWED_ORIGINS?.split(",") || ["http://localhost:3000"];
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(",") || ["http://localhost:3000"],
-  credentials: true,
+    origin: allowedOrigins,
+    credentials: true,
 }));
-app.use(express.json({ limit: '16kb' }));           // ← must be before routes
+app.use(express.json({ limit: '16kb' }));
 app.use(express.urlencoded({ extended: true, limit: "16kb" }));
 app.use(express.static("public"));
 app.use(cookieParser());
 
-
-app.use('/user' , authRouter)
+app.use('/user', authRouter)
 
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });
 });
 
-app.listen(PORT, () => {
+const httpServer = http.createServer(app)
+
+const io = new Server(httpServer, {
+    cors: {
+        origin: allowedOrigins,
+        credentials: true
+    },
+    pingTimeout: 60000,
+    pingInterval: 25000
+})
+
+export const onlineUsers = new Map<string, string>(); // ✅ exported
+
+io.on("connection", (socket) => {
+    console.log(`Socket connected: ${socket.id}`)
+
+    socket.on("user:online", (userId: string) => {
+        onlineUsers.set(userId, socket.id);
+        socket.data.userId = userId
+        io.emit("user:status", { userId, status: "online" });
+    })
+
+    socket.on("join-room", (roomId: string) => {
+        socket.join(roomId)
+        socket.to(roomId).emit("room:user-joined", {
+            socketId: socket.id,
+            userId: socket.data.userId
+        })
+    })
+
+    socket.on("leave-room", (roomId: string) => {
+        socket.leave(roomId)
+        socket.to(roomId).emit("room:user-left", {
+            socketId: socket.id,
+            userId: socket.data.userId,
+        })
+    })
+
+    socket.on("send-message", (data: { roomId: string, message: Record<string, unknown> }) => {
+        const { roomId, message } = data
+        socket.to(roomId).emit("receive-message", message);
+    })
+
+    socket.on("typing-start", ({ roomId }: { roomId: string }) => {
+        socket.to(roomId).emit("typing:start", {
+            userId: socket.data.userId
+        })
+    })
+
+    socket.on("typing:stop", ({ roomId }: { roomId: string }) => {
+        socket.to(roomId).emit("typing:stop", {
+            userId: socket.data.userId
+        })
+    })
+
+    socket.on("message:read", ({ roomId, messageId }: { roomId: string; messageId: string }) => {
+        socket.to(roomId).emit("message:read", {
+            messageId,
+            readBy: socket.data.userId,
+        });
+    })
+
+    socket.on("webrtc:offer", (data: { roomId: string; offer: RTCSessionDescriptionInit }) => {
+        socket.to(data.roomId).emit("webrtc:offer", {
+            offer: data.offer,
+            from: socket.id,
+        });
+    })
+
+    socket.on("webrtc:answer", (data: { roomId: string; answer: RTCSessionDescriptionInit }) => {
+        socket.to(data.roomId).emit("webrtc:answer", data.answer);
+    })
+
+    socket.on("webrtc:ice-candidate", (data: { roomId: string; candidate: RTCIceCandidateInit }) => {
+        socket.to(data.roomId).emit("webrtc:ice-candidate", data.candidate);
+    })
+
+    socket.on("webrtc:call-ended", ({ roomId }: { roomId: string }) => {
+        socket.to(roomId).emit("webrtc:call-ended");
+    })
+
+    socket.on("webrtc:call-rejected", ({ roomId }: { roomId: string }) => {
+        socket.to(roomId).emit("webrtc:call-rejected");
+    })
+
+    socket.on("disconnect", () => {
+        const userId = socket.data.userId as string | undefined;
+        if (userId) {
+            if (onlineUsers.get(userId) === socket.id) {
+                onlineUsers.delete(userId);
+                io.emit("user:status", { userId, status: "offline" });
+                console.log(`User offline: ${userId}`);
+            }
+        }
+    }) 
+
+}) 
+
+export { io };
+
+httpServer.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
 });

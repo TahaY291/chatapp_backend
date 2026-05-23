@@ -94,11 +94,7 @@ export const resetPasswordSchema = z.object({
         .regex(/[0-9]/, "Password must contain at least one number")
         .regex(/[^a-zA-Z0-9]/, "Password must contain at least one special character"),
 
-    confirmPassword: z.string(),
-}).refine((data) => data.newPassword === data.confirmPassword, {
-    message: "Passwords do not match",
-    path: ["confirmPassword"],
-});
+})
 
 export type RegisterInput = z.infer<typeof registerSchema>
 export type LoginInput       = z.infer<typeof loginSchema>;

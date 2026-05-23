@@ -2,12 +2,13 @@ import { CookieOptions, Request, RequestHandler, Response } from "express";
 import { db } from "../db";
 import { refreshTokens, users } from "../db/schema";
 import { asyncHandler } from "../lib/asyncHandler";
-import { LoginInput, RegisterInput } from "../validator/auth.validator";
+import { ForgotPasswordInput, LoginInput, RegisterInput, ResetPasswordInput, UpdateProfileInput } from "../validator/auth.validator";
 import { eq } from "drizzle-orm";
 import { ApiError } from "../lib/ApiError";
 import { bcryptPassword, generateAccessToken, generateRefreshToken, verifyPassword, verifyRefreshToken } from "../lib/auth";
 import { ApiResponse } from "../lib/ApiResponse";
 import transporter from "../utils/nodemailer";
+import { deleteFromCloudinary, uploadOnCloudinary } from "../utils/cloudinary";
 
 const generateAccessAndRefreshToken = async (userId: string) => {
     try {
@@ -186,14 +187,9 @@ export const verifyEmail = asyncHandler(async (req, res) => {
     if (user.isVerified) {
         throw new ApiError(400, "User already verified")
     }
-    if (!user.verifyOTP) {
-        throw new ApiError(400, "No OTP found")
-    }
-
-    if (user.verifyOTPExpiry! < new Date()) {
-        throw new ApiError(400, "OTP has expired")
-    }
-
+   if (!user.verifyOTP || !user.verifyOTPExpiry || user.verifyOTPExpiry < new Date()) {
+    throw new ApiError(400, "OTP expired or not found — please request a new one")
+}
     if (user.verifyOTP !== String(otp)) {
         throw new ApiError(400, "Invalid OTP")
     }
@@ -206,4 +202,139 @@ export const verifyEmail = asyncHandler(async (req, res) => {
     }).where(eq(users.id ,userId))
 
     res.status(200).json(new ApiResponse(200, null, "Email verified successfully"))
+})
+
+export const uploadUserAvatar = asyncHandler(async(req : Request, res: Response )=>{
+    const userId = req.user!.id
+
+    const existingUserArr = await db.select().from(users).where(eq(users.id , userId))
+    const existinguser = existingUserArr[0]
+
+    if (!existinguser) {
+        throw new ApiError(404 , "User not found")
+    }
+    if (!existinguser.isVerified) {
+        throw new ApiError(401 , "User is not verified")
+    }
+
+    if (!req.file) {
+        throw new ApiError(400 , "no file upload")
+    }
+
+    if (existinguser.avatarUrl) {
+        const publicid = existinguser.avatarUrl.split("/").pop()?.split('.')[0]
+        if (publicid) {
+            await deleteFromCloudinary(`avatars/${publicid}`)
+        }
+    }
+
+      const result = await uploadOnCloudinary(req.file.buffer, "avatars")
+    if (!result) {
+        throw new ApiError(500, "Failed to upload avatar")
+    }
+
+    await db.update(users)
+        .set({ avatarUrl: result.secure_url })
+        .where(eq(users.id, userId))
+
+    return res.status(200).json(
+        new ApiResponse(200, { avatarUrl: result.secure_url }, "Avatar uploaded successfully")
+    )
+})
+
+export const updateUsernameAndBio = asyncHandler(async (req: Request, res: Response) => {
+    const { username, about } = req.body as UpdateProfileInput
+    const userId = req.user!.id
+
+    if (!username && !about) {
+        throw new ApiError(400, "At least one field must be provided to update")
+    }
+
+    const usersArr = await db.select().from(users).where(eq(users.id, userId))
+    const user = usersArr[0]
+
+    if (!user) {
+        throw new ApiError(404, "User not found")
+    }
+
+    if (!user.isVerified) {
+        throw new ApiError(401, "Email is not verified")
+    }
+
+    const updatedUserArr = await db.update(users)
+        .set({
+            ...(username && { username }),
+            ...(about && { about })
+        })
+        .where(eq(users.id, userId))
+        .returning()
+
+    const { passwordHash, verifyOTP, verifyOTPExpiry,
+            resetOTP, resetOTPExpiry, ...safeUser } = updatedUserArr[0]
+
+    res.status(200).json(new ApiResponse(200, safeUser, "Profile updated successfully"))
+})
+
+export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Response) => {
+    const { email } = req.body as ForgotPasswordInput
+    
+    const usersArr = await db.select().from(users).where(eq(users.email, email))
+    const user = usersArr[0]
+
+    if (!user) {
+        throw new ApiError(404, "User not found")
+    }
+    
+    const otp = String(Math.floor(100000 + Math.random() * 900000))
+
+    await db.update(users).set({
+        resetOTP: otp,
+        resetOTPExpiry: new Date(Date.now() + 10 * 60 * 1000),
+    }).where(eq(users.email , email))
+
+
+    const mailOptions = {
+        from: process.env.SENDER_EMAIL,
+        to: user.email,
+        subject: "Your OTP for Password Reset",
+        text: `Dear ${user.username},\n\nYour OTP for password reset is: ${otp}. This OTP is valid for 10 minutes.\n\nBest regards,\nChatApp Team`
+    }
+    try {
+        await transporter.sendMail(mailOptions)
+    } catch (error) {
+        await db.update(users).set({
+        resetOTP: null,
+        resetOTPExpiry: null,
+    }).where(eq(users.email , email))
+        throw new ApiError(500, "Failed to send OTP email")
+    }
+    res.status(200).json(new ApiResponse(200, null, "OTP sent to email successfully"))
+})
+
+export const verifyResetPassword = asyncHandler(async (req, res) => {
+    const { email, otp, newPassword } = req.body as ResetPasswordInput
+    
+    const usersArr = await db.select().from(users).where(eq(users.email, email))
+    const user = usersArr[0]
+    if (!user) {
+        throw new ApiError(404, "User not found")
+    }
+
+    if (!user.resetOTP || !user.resetOTPExpiry || user.resetOTPExpiry < new Date()) {
+        throw new ApiError(400, "OTP has expired")
+    }
+
+    if (user.resetOTP !== String(otp)) {
+        throw new ApiError(400, "Invalid OTP")
+    }
+
+    const password = await bcryptPassword(newPassword)
+
+    await db.update(users).set({
+        resetOTP: null,
+        resetOTPExpiry: null,
+        passwordHash: password
+    }).where(eq(users.email, email))
+
+    res.status(200).json(new ApiResponse(200, null, "OTP verified successfully"))
 })
