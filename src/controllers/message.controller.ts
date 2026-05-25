@@ -1,2 +1,385 @@
+import { and, eq, or, count, desc, ne, inArray } from "drizzle-orm";
 import { db } from "../db";
-import { messages } from "../db/schema";
+import { contacts, conversation, conversationParticipants, messages, messageStatus, users } from "../db/schema";
+import { asyncHandler } from "../lib/asyncHandler";
+import { Request, Response } from "express";
+import { ApiError } from "../lib/ApiError";
+import { ApiResponse } from "../lib/ApiResponse";
+import { uploadOnCloudinary } from "../utils/cloudinary";
+import { io, onlineUsers } from "../index";
+import { alias } from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm";
+
+export const insertMessage = asyncHandler(async (req: Request, res: Response) => {
+    const { receiverEmail, content } = req.body
+    const senderId = req.user!.id
+
+    // validate at least one of content or file
+    if (!content && !req.file) {
+        throw new ApiError(400, "Message content or file is required")
+    }
+
+    // get receiver by email
+    const receiverArr = await db.select().from(users).where(eq(users.email, receiverEmail))
+    const receiver = receiverArr[0]
+    if (!receiver) {
+        throw new ApiError(404, "Receiver not found")
+    }
+
+    // check if conversation exists
+    const existingConversation = await db
+        .select({ conversationId: conversationParticipants.conversationId })
+        .from(conversationParticipants)
+        .innerJoin(conversation, eq(conversationParticipants.conversationId, conversation.id))
+        .where(
+            and(
+                eq(conversation.type, "direct"),
+                or(
+                    eq(conversationParticipants.userId, senderId),
+                    eq(conversationParticipants.userId, receiver.id)
+                )
+            )
+        )
+        .groupBy(conversationParticipants.conversationId)
+        .having(eq(count(conversationParticipants.userId), 2))
+
+    const existingConversationId = existingConversation[0]?.conversationId
+    let currentConversationId: string
+
+    if (!existingConversationId) {
+        // create new conversation
+        const newConversationArr = await db.insert(conversation).values({
+            createdBy: senderId,
+            type: "direct"
+        }).returning()
+        const newConversation = newConversationArr[0]
+        currentConversationId = newConversation.id
+
+        // add participants
+        await db.insert(conversationParticipants).values({
+            conversationId: newConversation.id,
+            userId: senderId
+        }).onConflictDoNothing()
+
+        await db.insert(conversationParticipants).values({
+            conversationId: newConversation.id,
+            userId: receiver.id
+        }).onConflictDoNothing()
+
+        // add contacts both ways
+        await db.insert(contacts).values({
+            ownerId: senderId,
+            contactId: receiver.id
+        }).onConflictDoNothing()
+
+        await db.insert(contacts).values({
+            ownerId: receiver.id,
+            contactId: senderId
+        }).onConflictDoNothing()
+
+    } else {
+        currentConversationId = existingConversationId
+    }
+
+    // handle file upload
+    let mediaUrl = null
+    let messageType = "text"
+
+    if (req.file) {
+        const result = await uploadOnCloudinary(req.file.buffer, "messages")
+        if (!result) throw new ApiError(500, "Failed to upload file")
+        mediaUrl = result.secure_url
+
+        if (req.file.mimetype.startsWith("image/")) messageType = "image"
+        else if (req.file.mimetype.startsWith("video/")) messageType = "video"
+        else if (req.file.mimetype.startsWith("audio/")) messageType = "audio"
+        else messageType = "file"
+    }
+
+    // insert message
+    const newMessage = await db.insert(messages).values({
+        conversationId: currentConversationId,
+        senderId: senderId,
+        content: content || null,
+        mediaUrl: mediaUrl || null,
+        type: messageType as any
+    }).returning()
+
+    // insert message status for receiver
+    await db.insert(messageStatus).values({
+        messageId: newMessage[0].id,
+        userId: receiver.id,
+        status: "sent"
+    })
+
+    // update lastMessageAt
+    await db.update(conversation)
+        .set({ updatedAt: new Date() })
+        .where(eq(conversation.id, currentConversationId))
+
+    // emit to receiver if online
+    const receiverSocketId = onlineUsers.get(receiver.id)
+    if (receiverSocketId) {
+        io.to(receiverSocketId).emit("receive-message", newMessage[0])
+    }
+
+    return res.status(201).json(
+        new ApiResponse(201, newMessage[0], "Message sent successfully")
+    )
+})
+
+export const getMessages = asyncHandler(async (req: Request, res:Response)=> {
+    const conversationId = req.params.conversationId as string
+    const senderId = req.user!.id
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const offset = (page - 1) * limit; 
+
+
+      const participant = await db.select()
+        .from(conversationParticipants)
+        .where(
+            and(
+                eq(conversationParticipants.conversationId, conversationId),
+                eq(conversationParticipants.userId, senderId)
+            )
+        )
+
+           if (!participant[0]) {
+        throw new ApiError(403, "You are not a participant of this conversation")
+    }
+
+      const conversationMessages = await db
+        .select()
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId))
+        .orderBy(messages.createdAt)  // oldest first like WhatsApp
+        .limit(limit)
+        .offset(offset)
+
+
+          // get total count for frontend to know total pages
+    const totalMessages = await db
+        .select({ count: count() })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId))
+
+
+ const total = totalMessages[0].count
+    const totalPages = Math.ceil(Number(total) / limit)
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            messages: conversationMessages,
+            pagination: {
+                page,
+                limit,
+                total,
+                totalPages,
+                hasNextPage: page < totalPages,
+                hasPrevPage: page > 1
+            }
+        }, "Messages fetched successfully")
+    )
+
+ })
+export const getConversations = asyncHandler(async (req: Request, res: Response) => {
+    const currentUserId = req.user!.id
+
+    const myParticipation    = alias(conversationParticipants, "my_participation")
+    const otherParticipation = alias(conversationParticipants, "other_participation")
+
+    const lastMessageSubquery = db
+        .select({
+            conversationId: messages.conversationId,
+            content:        messages.content,
+            type:           messages.type,
+            createdAt:      messages.createdAt,
+        })
+        .from(messages)
+        .where(
+            eq(
+                messages.createdAt,
+                db
+                    .select({ maxDate: sql`MAX(${messages.createdAt})` })
+                    .from(messages)
+                    .where(eq(messages.conversationId, messages.conversationId))
+            )
+        )
+        .as("last_message")
+
+    // ── subquery 2: unread count using messageStatus table ────────
+    const unreadCountSubquery = db
+        .select({
+            conversationId: messages.conversationId,
+            unreadCount:    sql<number>`COUNT(*)`.as("unread_count"),
+        })
+        .from(messages)
+        .innerJoin(
+            messageStatus,
+            and(
+                eq(messageStatus.messageId, messages.id),
+                eq(messageStatus.userId, currentUserId),
+            )
+        )
+        .where(
+            and(
+                ne(messages.senderId, currentUserId),
+                ne(messageStatus.status, "read")
+            )
+        )
+        .groupBy(messages.conversationId)
+        .as("unread_count")
+
+    // ── main query ────────────────────────────────────────────────
+    const conversations = await db
+        .select({
+            conversationId:  conversation.id,
+            updatedAt:       conversation.updatedAt,
+            type:            conversation.type,
+
+            otherUserId:     users.id,
+            otherUsername:   users.username,
+            otherAvatarUrl:  users.avatarUrl,
+            otherIsOnline:   users.isOnline,
+
+            lastMessage:     lastMessageSubquery.content,
+            lastMessageType: lastMessageSubquery.type,
+            lastMessageAt:   lastMessageSubquery.createdAt,
+
+            unreadCount:     sql<number>`COALESCE(${unreadCountSubquery.unreadCount}, 0)`,
+        })
+        .from(myParticipation)
+        .innerJoin(
+            conversation,
+            eq(myParticipation.conversationId, conversation.id)
+        )
+        .innerJoin(
+            otherParticipation,
+            and(
+                eq(otherParticipation.conversationId, conversation.id),
+                ne(otherParticipation.userId, currentUserId)
+            )
+        )
+        .innerJoin(
+            users,
+            eq(users.id, otherParticipation.userId)
+        )
+        .leftJoin(
+            lastMessageSubquery,
+            eq(lastMessageSubquery.conversationId, conversation.id)
+        )
+        .leftJoin(
+            unreadCountSubquery,
+            eq(unreadCountSubquery.conversationId, conversation.id)
+        )
+        .where(eq(myParticipation.userId, currentUserId))
+        .orderBy(desc(conversation.updatedAt))
+
+    return res.status(200).json(
+        new ApiResponse(200, conversations, "Conversations fetched successfully")
+    )
+})
+export const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
+    const currentUserId = req.user!.id
+    const messageId = req.params.messageId as string
+
+    // find message
+    const messageArr = await db.select().from(messages).where(eq(messages.id, messageId))
+    const message = messageArr[0]
+
+    if (!message) {
+        throw new ApiError(404, "Message not found")
+    }
+
+    // only sender can delete their own message
+    if (message.senderId !== currentUserId) {
+        throw new ApiError(403, "You can only delete your own messages")
+    }
+
+    // soft delete — just mark as deleted, don't remove from DB
+    await db.update(messages)
+        .set({ isDeleted: true })
+        .where(eq(messages.id, messageId))
+
+    // emit socket event so receiver sees "This message was deleted" instantly
+    const conversationParticipantsArr = await db
+        .select()
+        .from(conversationParticipants)
+        .where(eq(conversationParticipants.conversationId, message.conversationId))
+
+    conversationParticipantsArr.forEach((participant) => {
+        if (participant.userId !== currentUserId) {
+            const receiverSocketId = onlineUsers.get(participant.userId)
+            if (receiverSocketId) {
+                io.to(receiverSocketId).emit("message:deleted", { messageId })
+            }
+        }
+    })
+
+    return res.status(200).json(
+        new ApiResponse(200, null, "Message deleted successfully")
+    )
+})
+
+export const markAsRead = asyncHandler(async (req: Request, res: Response) => {
+    const currentUserId = req.user!.id
+    const { conversationId } = req.params as { conversationId: string }
+
+    const unreadMessages = await db
+        .select({ messageId: messageStatus.messageId })
+        .from(messageStatus)
+        .innerJoin(messages, eq(messages.id, messageStatus.messageId))
+        .where(
+            and(
+                eq(messages.conversationId, conversationId),
+                eq(messageStatus.userId, currentUserId),
+                ne(messageStatus.status, "read")
+            )
+        )
+
+    if (unreadMessages.length === 0) {
+        return res.status(200).json(
+            new ApiResponse(200, null, "No unread messages")
+        )
+    }
+
+    // update all to read
+    const unreadMessageIds = unreadMessages.map((m) => m.messageId)
+
+    await db.update(messageStatus)
+        .set({
+            status: "read",
+            updatedAt: new Date()
+        })
+        .where(
+            and(
+                inArray(messageStatus.messageId, unreadMessageIds),
+                eq(messageStatus.userId, currentUserId)
+            )
+        )
+
+    // emit to sender that their messages were read (double blue tick)
+    const conversationParticipantsArr = await db
+        .select()
+        .from(conversationParticipants)
+        .where(eq(conversationParticipants.conversationId, conversationId))
+
+    conversationParticipantsArr.forEach((participant) => {
+        if (participant.userId !== currentUserId) {
+            const senderSocketId = onlineUsers.get(participant.userId)
+            if (senderSocketId) {
+                io.to(senderSocketId).emit("message:read", {
+                    conversationId,
+                    readBy: currentUserId,
+                    messageIds: unreadMessageIds
+                })
+            }
+        }
+    })
+
+    return res.status(200).json(
+        new ApiResponse(200, null, "Messages marked as read")
+    )
+})

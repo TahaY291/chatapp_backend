@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import authRouter from '../src/routes/auth.routes'
+import messageRouter from '../src/routes/messages.routes'
 import { Server } from "socket.io";
 import http from 'http'
 
@@ -24,7 +25,7 @@ app.use(express.static("public"));
 app.use(cookieParser());
 
 app.use('/user', authRouter)
-
+app.use('/message', messageRouter)
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });
 });
@@ -40,7 +41,7 @@ const io = new Server(httpServer, {
     pingInterval: 25000
 })
 
-export const onlineUsers = new Map<string, string>(); // ✅ exported
+export const onlineUsers = new Map<string, string>();
 
 io.on("connection", (socket) => {
     console.log(`Socket connected: ${socket.id}`)
