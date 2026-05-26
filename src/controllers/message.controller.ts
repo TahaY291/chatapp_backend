@@ -184,6 +184,8 @@ export const getMessages = asyncHandler(async (req: Request, res:Response)=> {
     )
 
  })
+
+ 
 export const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const currentUserId = req.user!.id
 
