@@ -6,7 +6,7 @@ import { ApiResponse } from "../lib/ApiResponse";
 import { asyncHandler } from "../lib/asyncHandler";
 import { deleteFromCloudinary, uploadOnCloudinary } from "../utils/cloudinary";
 import { GroupInput } from "../validator/group.validator";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { io, onlineUsers } from "../index";
 import { sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
@@ -379,9 +379,7 @@ export const updateGroupDetails = asyncHandler(async (req: Request, res: Respons
 export const getAllGroups = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.id
 
-     const myParticipation    = alias(conversationParticipants, "my_participation")
-        const otherParticipation = alias(conversationParticipants, "other_participation")
-    
+    const myParticipation = alias(conversationParticipants, "my_participation")
 
     const lastMessageSubquery = db.select(
         {
@@ -391,19 +389,19 @@ export const getAllGroups = asyncHandler(async (req: Request, res: Response) => 
             createdAt: messages.createdAt,
         }
     ).from(messages).where(
-         eq(
-                        messages.createdAt,
-                        db
-                            .select({ maxDate: sql`MAX(${messages.createdAt})` })
-                            .from(messages)
-                            .where(eq(messages.conversationId, messages.conversationId))
-                    )
+        eq(
+            messages.createdAt,
+            db
+                .select({ maxDate: sql`MAX(${messages.createdAt})` })
+                .from(messages)
+                .where(eq(messages.conversationId, messages.conversationId))
+        )
     ).as('last_message')
 
-     const unreadCountSubquery = db
+    const unreadCountSubquery = db
         .select({
             conversationId: messages.conversationId,
-            unreadCount:    sql<number>`COUNT(*)`.as("unread_count"),
+            unreadCount: sql<number>`COUNT(*)`.as("unread_count"),
         })
         .from(messages)
         .innerJoin(
@@ -422,5 +420,97 @@ export const getAllGroups = asyncHandler(async (req: Request, res: Response) => 
         .groupBy(messages.conversationId)
         .as("unread_count")
 
+    const memberCountSubquery = db.select({
+        conversationId: conversationParticipants.conversationId,
+        memberCount: sql<number> `Count(*)`.as("member_count")
+    })
+        .from(conversationParticipants)
+        .groupBy(conversationParticipants.conversationId)
+        .as('member_count')
+
+    const groups = await db.select({
+        conversationId: conversation.id,
+        name: conversation.name,
+        avatarUrl: conversation.avatarUrl,
+        description: conversation.description,
+        updatedAt: conversation.updatedAt,
+        type: conversation.type,
+
+        lastMessage: lastMessageSubquery.content,
+        lastMessageType: lastMessageSubquery.type,
+        lastMessageAt: lastMessageSubquery.createdAt,
+
+        unreadCount: sql<number>`COALESCE(${unreadCountSubquery.unreadCount}, 0)`,
+
+        memberCount: sql<number>`COALESCE(${memberCountSubquery.memberCount}, 0)`,
+    }).from(myParticipation)
+        .innerJoin(
+            conversation,
+            and(
+                eq(myParticipation.conversationId, conversation.id),
+                eq(conversation.type, "group")
+            )
+        )
+        .leftJoin(
+            lastMessageSubquery,
+            eq(lastMessageSubquery.conversationId, conversation.id)
+        )
+        .leftJoin(
+            unreadCountSubquery,
+            eq(unreadCountSubquery.conversationId, conversation.id)
+        )
+        .leftJoin(
+            memberCountSubquery,
+            eq(memberCountSubquery.conversationId, conversation.id)
+        )
+        .where(eq(myParticipation.userId, userId))
+        .orderBy(desc(conversation.updatedAt))
+
+    return res.status(200).json(
+        new ApiResponse(200, groups, "Groups fetched successfully")
+    )
+
+})
+// getGroupMessages
+// ❌ deleteGroup
+
+export const getGroupMessages = asyncHandler(async(req: Request , res: Response)=>{
+    const conversationId = req.params.conversationId as string
+    const userId = req.user!.id
+
+    const page = parseInt(req.query.page as string) || 1
+    const limit = parseInt(req.query.limit as string) || 50
+    const offset = (page - 1) * limit;
+
+    const participant = await db.select()
+    .from(conversationParticipants)
+    .where(
+        and(
+            eq(conversationParticipants.conversationId , conversationId),
+            eq(conversationParticipants.userId , userId)
+        )
+    )
+
+    if (!participant[0]) {
+        throw new ApiError(403 , "You are not the participant of this conversation")
+    }
+
+    const groupConversation = await db.select({
+        content: messages.content,
+        mediaUrl: messages.mediaUrl,
+        createdAt: messages.createdAt,
+        updatedAt: messages.updatedAt,
+        type: messages.type,
+        replyToId: messages.replyToId,
+        isDeleted: messages.isDeleted,
+
         
+    }).from(messages)
+    .innerJoin(
+        users,
+        eq(messages.senderId , users.id)
+    )
+    .where(
+            eq(messages.conversationId , conversationId)
+    )
 })

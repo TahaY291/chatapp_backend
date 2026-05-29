@@ -13,7 +13,6 @@ router.route('/send').post(verifyUser, uploadMessageFile.single("file"), sendMes
 router.route('/delete/:messageId').delete(verifyUser, deleteMessage)
 router.route('/read/:conversationId').patch(verifyUser, markAsRead)
 
-// ✅ dynamic route last
 router.route('/:conversationId').get(verifyUser, getMessages)
 
 export default router
