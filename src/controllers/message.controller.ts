@@ -151,8 +151,31 @@ export const getMessages = asyncHandler(async (req: Request, res:Response)=> {
     }
 
       const conversationMessages = await db
-        .select()
+         .select({
+        id:        messages.id,
+        content:   messages.content,
+        mediaUrl:  messages.mediaUrl,
+        type:      messages.type,
+        isDeleted: messages.isDeleted,
+        replyToId: messages.replyToId,
+        createdAt: messages.createdAt,
+        senderId:  messages.senderId,
+
+        senderUsername: users.username,
+        senderAvatar:   users.avatarUrl,
+        nickname: contacts.nickname,
+    })
         .from(messages)
+        .innerJoin(
+            users,
+            eq(messages.senderId , users.id)
+        )
+        .leftJoin(contacts , 
+            and(
+                eq(contacts.ownerId , senderId),
+                eq(contacts.contactId , users.id)
+            )
+        )
         .where(eq(messages.conversationId, conversationId))
         .orderBy(messages.createdAt)  // oldest first like WhatsApp
         .limit(limit)
@@ -235,49 +258,46 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
         .as("unread_count")
 
     // ── main query ────────────────────────────────────────────────
-    const conversations = await db
-        .select({
-            conversationId:  conversation.id,
-            updatedAt:       conversation.updatedAt,
-            type:            conversation.type,
+ const conversations = await db
+    .select({
+        conversationId:  conversation.id,
+        updatedAt:       conversation.updatedAt,
+        type:            conversation.type,
 
-            otherUserId:     users.id,
-            otherUsername:   users.username,
-            otherAvatarUrl:  users.avatarUrl,
-            otherIsOnline:   users.isOnline,
+        otherUserId:     users.id,
+        otherUsername:   users.username,
+        otherAvatarUrl:  users.avatarUrl,
+        otherIsOnline:   users.isOnline,
 
-            lastMessage:     lastMessageSubquery.content,
-            lastMessageType: lastMessageSubquery.type,
-            lastMessageAt:   lastMessageSubquery.createdAt,
+        // ✅ how current user saved the other person
+        nickname:        contacts.nickname,
 
-            unreadCount:     sql<number>`COALESCE(${unreadCountSubquery.unreadCount}, 0)`,
-        })
-        .from(myParticipation)
-        .innerJoin(
-            conversation,
-            eq(myParticipation.conversationId, conversation.id)
+        lastMessage:     lastMessageSubquery.content,
+        lastMessageType: lastMessageSubquery.type,
+        lastMessageAt:   lastMessageSubquery.createdAt,
+        unreadCount:     sql<number>`COALESCE(${unreadCountSubquery.unreadCount}, 0)`,
+    })
+    .from(myParticipation)
+    .innerJoin(conversation, eq(myParticipation.conversationId, conversation.id))
+    .innerJoin(
+        otherParticipation,
+        and(
+            eq(otherParticipation.conversationId, conversation.id),
+            ne(otherParticipation.userId, currentUserId)
         )
-        .innerJoin(
-            otherParticipation,
-            and(
-                eq(otherParticipation.conversationId, conversation.id),
-                ne(otherParticipation.userId, currentUserId)
-            )
+    )
+    .innerJoin(users, eq(users.id, otherParticipation.userId))
+    .leftJoin(
+        contacts,
+        and(
+            eq(contacts.ownerId, currentUserId),
+            eq(contacts.contactId, users.id)
         )
-        .innerJoin(
-            users,
-            eq(users.id, otherParticipation.userId)
-        )
-        .leftJoin(
-            lastMessageSubquery,
-            eq(lastMessageSubquery.conversationId, conversation.id)
-        )
-        .leftJoin(
-            unreadCountSubquery,
-            eq(unreadCountSubquery.conversationId, conversation.id)
-        )
-        .where(eq(myParticipation.userId, currentUserId))
-        .orderBy(desc(conversation.updatedAt))
+    )
+    .leftJoin(lastMessageSubquery, eq(lastMessageSubquery.conversationId, conversation.id))
+    .leftJoin(unreadCountSubquery, eq(unreadCountSubquery.conversationId, conversation.id))
+    .where(eq(myParticipation.userId, currentUserId))
+    .orderBy(desc(conversation.updatedAt))
 
     return res.status(200).json(
         new ApiResponse(200, conversations, "Conversations fetched successfully")

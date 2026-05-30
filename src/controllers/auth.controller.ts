@@ -338,3 +338,27 @@ export const verifyResetPassword = asyncHandler(async (req, res) => {
 
     res.status(200).json(new ApiResponse(200, null, "OTP verified successfully"))
 })
+
+export const searchUserByEmail = asyncHandler(async(req : Request, res: Response)=> {
+    const email = req.query.email as string
+
+    if (!email) {
+        throw new ApiError(400 , "Email is required")
+    }
+
+    const usersEmailArr = await db.select({
+         id:        users.id,
+        username:  users.username,
+        email:     users.email,
+        avatarUrl: users.avatarUrl,
+        about:     users.about,
+        isOnline:  users.isOnline,
+    }).from(users).where(eq(users.email , email))
+
+    if (!usersEmailArr[0]) {
+        throw new ApiError(404 , "User not exist with this email")
+    }
+
+    return res.status(200).json(new ApiResponse(200 , usersEmailArr[0], "User fetched successfuly"))
+
+})

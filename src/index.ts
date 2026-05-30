@@ -3,6 +3,8 @@ import dotenv from "dotenv";
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import authRouter from '../src/routes/auth.routes'
+import contactRouter from '../src/routes/contact.routes'
+import groupRouter from '../src/routes/group.routes'
 import messageRouter from '../src/routes/messages.routes'
 import { Server } from "socket.io";
 import http from 'http'
@@ -26,6 +28,8 @@ app.use(cookieParser());
 
 app.use('/user', authRouter)
 app.use('/message', messageRouter)
+app.use('/group', groupRouter)
+app.use('/contact', contactRouter)
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });
 });

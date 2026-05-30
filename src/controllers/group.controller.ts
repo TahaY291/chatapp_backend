@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { db } from "../db";
-import { conversation, conversationParticipants, messages, messageStatus, users } from "../db/schema";
+import { contacts, conversation, conversationParticipants, messages, messageStatus, users } from "../db/schema";
 import { ApiError } from "../lib/ApiError";
 import { ApiResponse } from "../lib/ApiResponse";
 import { asyncHandler } from "../lib/asyncHandler";
@@ -10,6 +10,7 @@ import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { io, onlineUsers } from "../index";
 import { sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { count } from "drizzle-orm";
 
 
 export const createGroup = asyncHandler(async (req: Request, res: Response) => {
@@ -471,8 +472,6 @@ export const getAllGroups = asyncHandler(async (req: Request, res: Response) => 
     )
 
 })
-// getGroupMessages
-// ❌ deleteGroup
 
 export const getGroupMessages = asyncHandler(async(req: Request , res: Response)=>{
     const conversationId = req.params.conversationId as string
@@ -496,21 +495,106 @@ export const getGroupMessages = asyncHandler(async(req: Request , res: Response)
     }
 
     const groupConversation = await db.select({
-        content: messages.content,
-        mediaUrl: messages.mediaUrl,
-        createdAt: messages.createdAt,
-        updatedAt: messages.updatedAt,
-        type: messages.type,
-        replyToId: messages.replyToId,
-        isDeleted: messages.isDeleted,
+         id:        messages.id,
+    content:   messages.content,
+    mediaUrl:  messages.mediaUrl,
+    createdAt: messages.createdAt,
+    updatedAt: messages.updatedAt,
+    type:      messages.type,
+    replyToId: messages.replyToId,
+    isDeleted: messages.isDeleted,
+    senderId:  messages.senderId,
+
+    // sender info
+    senderUsername: users.username,
+    senderAvatar:   users.avatarUrl,
+
+    // ✅ nickname
+    nickname: contacts.nickname,
 
         
     }).from(messages)
-    .innerJoin(
-        users,
-        eq(messages.senderId , users.id)
+.innerJoin(users, eq(messages.senderId, users.id))
+.leftJoin(
+    contacts,
+    and(
+        eq(contacts.ownerId, userId),
+        eq(contacts.contactId, users.id)
     )
-    .where(
-            eq(messages.conversationId , conversationId)
+)
+.where(eq(messages.conversationId, conversationId))
+.orderBy(messages.createdAt)
+.limit(limit)
+.offset(offset)
+
+const totalMessages = await db
+    .select({ count: count() })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+
+const total = totalMessages[0].count
+const totalPages = Math.ceil(Number(total) / limit)
+
+return res.status(200).json(
+    new ApiResponse(200, {
+        messages: groupConversation,
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages,
+            hasNextPage: page < totalPages,
+            hasPrevPage: page > 1
+        }
+    }, "Group messages fetched successfully")
+)
+})
+
+
+export const deleteGroup = asyncHandler(async (req: Request, res: Response) => {
+    const conversationId = req.params.conversationId as string
+    const userId = req.user!.id
+
+    const isAdminArr = await db.select()
+        .from(conversationParticipants)
+        .where(
+            and(
+                eq(conversationParticipants.conversationId, conversationId),
+                eq(conversationParticipants.userId, userId),
+                eq(conversationParticipants.role, "admin")
+            )
+        )
+
+    if (!isAdminArr[0]) {
+        throw new ApiError(403, "Only admin is allowed to delete the group")
+    }
+
+    const allParticipants = await db.select()
+        .from(conversationParticipants)
+        .where(eq(conversationParticipants.conversationId, conversationId))
+
+    const groupArr = await db.select()
+        .from(conversation)
+        .where(eq(conversation.id, conversationId))
+
+    if (groupArr[0]?.avatarUrl) {
+        const publicId = groupArr[0].avatarUrl.split("/").pop()?.split('.')[0]
+        if (publicId) await deleteFromCloudinary(`avatars/${publicId}`)
+    }
+
+    await db.delete(conversation).where(eq(conversation.id, conversationId))
+
+    allParticipants.forEach(participant => {
+        const socketId = onlineUsers.get(participant.userId)
+        if (socketId) {
+            io.to(socketId).emit("group:deleted", {
+                conversationId,
+                deletedBy: userId
+            })
+        }
+    })
+
+    return res.status(200).json(
+        new ApiResponse(200, null, "Group deleted successfully")
     )
 })
