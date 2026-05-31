@@ -1,6 +1,6 @@
 import { and, eq, or, count, desc, ne, inArray } from "drizzle-orm";
 import { db } from "../db";
-import { contacts, conversation, conversationParticipants, messages, messageStatus, users } from "../db/schema";
+import { blockedUsers, contacts, conversation, conversationParticipants, messages, messageStatus, users } from "../db/schema";
 import { asyncHandler } from "../lib/asyncHandler";
 import { Request, Response } from "express";
 import { ApiError } from "../lib/ApiError";
@@ -128,52 +128,74 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
     )
 })
 
-export const getMessages = asyncHandler(async (req: Request, res:Response)=> {
+export const getMessages = asyncHandler(async (req: Request, res: Response) => {
     const conversationId = req.params.conversationId as string
     const senderId = req.user!.id
 
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
-    const offset = (page - 1) * limit; 
+    const offset = (page - 1) * limit;
 
 
-      const participant = await db.select()
-        .from(conversationParticipants)
-        .where(
-            and(
-                eq(conversationParticipants.conversationId, conversationId),
-                eq(conversationParticipants.userId, senderId)
-            )
+    const participant = await db.select()
+    .from(conversationParticipants)
+    .where(
+        and(
+            eq(conversationParticipants.conversationId, conversationId),
+            eq(conversationParticipants.userId, senderId)
         )
+    )
 
-           if (!participant[0]) {
+    if (!participant[0]) {
         throw new ApiError(403, "You are not a participant of this conversation")
     }
+    
+    const otherParticipantArr = await db.select().from(conversationParticipants).where(and(
+            eq(conversationParticipants.conversationId , conversationId),
+            ne(conversationParticipants.userId, senderId)
+        ))
+        const otherParticipantId = otherParticipantArr[0].userId
 
-      const conversationMessages = await db
-         .select({
-        id:        messages.id,
-        content:   messages.content,
-        mediaUrl:  messages.mediaUrl,
-        type:      messages.type,
-        isDeleted: messages.isDeleted,
-        replyToId: messages.replyToId,
-        createdAt: messages.createdAt,
-        senderId:  messages.senderId,
+        const isBlockedArr = await db.select().from(blockedUsers).where(
+            or(
+                and(
+                    eq(blockedUsers.blockerId , senderId),
+                    eq(blockedUsers.blockedId, otherParticipantId)
+                ),
+                and(
+                    eq(blockedUsers.blockerId , otherParticipantId),
+                    eq(blockedUsers.blockedId, senderId)
+                ),
+            )
+        )
+        const isBlocked = isBlockedArr[0]
 
-        senderUsername: users.username,
-        senderAvatar:   users.avatarUrl,
-        nickname: contacts.nickname,
-    })
+
+
+    const conversationMessages = await db
+        .select({
+            id: messages.id,
+            content: messages.content,
+            mediaUrl: messages.mediaUrl,
+            type: messages.type,
+            isDeleted: messages.isDeleted,
+            replyToId: messages.replyToId,
+            createdAt: messages.createdAt,
+            senderId: messages.senderId,
+
+            senderUsername: users.username,
+            senderAvatar: users.avatarUrl,
+            nickname: contacts.nickname,
+        })
         .from(messages)
         .innerJoin(
             users,
-            eq(messages.senderId , users.id)
+            eq(messages.senderId, users.id)
         )
-        .leftJoin(contacts , 
+        .leftJoin(contacts,
             and(
-                eq(contacts.ownerId , senderId),
-                eq(contacts.contactId , users.id)
+                eq(contacts.ownerId, senderId),
+                eq(contacts.contactId, users.id)
             )
         )
         .where(eq(messages.conversationId, conversationId))
@@ -182,19 +204,20 @@ export const getMessages = asyncHandler(async (req: Request, res:Response)=> {
         .offset(offset)
 
 
-          // get total count for frontend to know total pages
+    // get total count for frontend to know total pages
     const totalMessages = await db
         .select({ count: count() })
         .from(messages)
         .where(eq(messages.conversationId, conversationId))
 
 
- const total = totalMessages[0].count
+    const total = totalMessages[0].count
     const totalPages = Math.ceil(Number(total) / limit)
 
     return res.status(200).json(
         new ApiResponse(200, {
             messages: conversationMessages,
+            isBlocked: isBlocked ? true : false,
             pagination: {
                 page,
                 limit,
@@ -206,21 +229,21 @@ export const getMessages = asyncHandler(async (req: Request, res:Response)=> {
         }, "Messages fetched successfully")
     )
 
- })
+})
 
- 
+
 export const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const currentUserId = req.user!.id
 
-    const myParticipation    = alias(conversationParticipants, "my_participation")
+    const myParticipation = alias(conversationParticipants, "my_participation")
     const otherParticipation = alias(conversationParticipants, "other_participation")
 
     const lastMessageSubquery = db
         .select({
             conversationId: messages.conversationId,
-            content:        messages.content,
-            type:           messages.type,
-            createdAt:      messages.createdAt,
+            content: messages.content,
+            type: messages.type,
+            createdAt: messages.createdAt,
         })
         .from(messages)
         .where(
@@ -238,7 +261,7 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
     const unreadCountSubquery = db
         .select({
             conversationId: messages.conversationId,
-            unreadCount:    sql<number>`COUNT(*)`.as("unread_count"),
+            unreadCount: sql<number>`COUNT(*)`.as("unread_count"),
         })
         .from(messages)
         .innerJoin(
@@ -258,46 +281,46 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
         .as("unread_count")
 
     // ── main query ────────────────────────────────────────────────
- const conversations = await db
-    .select({
-        conversationId:  conversation.id,
-        updatedAt:       conversation.updatedAt,
-        type:            conversation.type,
+    const conversations = await db
+        .select({
+            conversationId: conversation.id,
+            updatedAt: conversation.updatedAt,
+            type: conversation.type,
 
-        otherUserId:     users.id,
-        otherUsername:   users.username,
-        otherAvatarUrl:  users.avatarUrl,
-        otherIsOnline:   users.isOnline,
+            otherUserId: users.id,
+            otherUsername: users.username,
+            otherAvatarUrl: users.avatarUrl,
+            otherIsOnline: users.isOnline,
 
-        // ✅ how current user saved the other person
-        nickname:        contacts.nickname,
+            // ✅ how current user saved the other person
+            nickname: contacts.nickname,
 
-        lastMessage:     lastMessageSubquery.content,
-        lastMessageType: lastMessageSubquery.type,
-        lastMessageAt:   lastMessageSubquery.createdAt,
-        unreadCount:     sql<number>`COALESCE(${unreadCountSubquery.unreadCount}, 0)`,
-    })
-    .from(myParticipation)
-    .innerJoin(conversation, eq(myParticipation.conversationId, conversation.id))
-    .innerJoin(
-        otherParticipation,
-        and(
-            eq(otherParticipation.conversationId, conversation.id),
-            ne(otherParticipation.userId, currentUserId)
+            lastMessage: lastMessageSubquery.content,
+            lastMessageType: lastMessageSubquery.type,
+            lastMessageAt: lastMessageSubquery.createdAt,
+            unreadCount: sql<number>`COALESCE(${unreadCountSubquery.unreadCount}, 0)`,
+        })
+        .from(myParticipation)
+        .innerJoin(conversation, eq(myParticipation.conversationId, conversation.id))
+        .innerJoin(
+            otherParticipation,
+            and(
+                eq(otherParticipation.conversationId, conversation.id),
+                ne(otherParticipation.userId, currentUserId)
+            )
         )
-    )
-    .innerJoin(users, eq(users.id, otherParticipation.userId))
-    .leftJoin(
-        contacts,
-        and(
-            eq(contacts.ownerId, currentUserId),
-            eq(contacts.contactId, users.id)
+        .innerJoin(users, eq(users.id, otherParticipation.userId))
+        .leftJoin(
+            contacts,
+            and(
+                eq(contacts.ownerId, currentUserId),
+                eq(contacts.contactId, users.id)
+            )
         )
-    )
-    .leftJoin(lastMessageSubquery, eq(lastMessageSubquery.conversationId, conversation.id))
-    .leftJoin(unreadCountSubquery, eq(unreadCountSubquery.conversationId, conversation.id))
-    .where(eq(myParticipation.userId, currentUserId))
-    .orderBy(desc(conversation.updatedAt))
+        .leftJoin(lastMessageSubquery, eq(lastMessageSubquery.conversationId, conversation.id))
+        .leftJoin(unreadCountSubquery, eq(unreadCountSubquery.conversationId, conversation.id))
+        .where(eq(myParticipation.userId, currentUserId))
+        .orderBy(desc(conversation.updatedAt))
 
     return res.status(200).json(
         new ApiResponse(200, conversations, "Conversations fetched successfully")

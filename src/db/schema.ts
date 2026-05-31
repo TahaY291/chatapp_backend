@@ -1,3 +1,4 @@
+import { integer } from "drizzle-orm/pg-core";
 import { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
     pgEnum, uuid, text, boolean, timestamp, primaryKey,
@@ -8,6 +9,8 @@ export const conversationTypeEnum = pgEnum("conversation_type_enum", ["direct", 
 export const participantRoleEnum = pgEnum("participant_role_enum", ["admin", "member"])
 export const messageTypeEnum = pgEnum("message_type_enum", ['text', 'image', 'video', 'audio', 'file', 'system'])
 export const messageStatusEnum = pgEnum("message_status_enum", ['sent', 'delivered', 'read'])
+export const callEnum = pgEnum("call_enum", ['audio', 'video'])
+export const callStatusEnum = pgEnum("call_status_enum", ['missed', 'rejected', 'completed'])
 
 export const users = pgTable('users', {
     id: uuid("id").primaryKey().defaultRandom(), 
@@ -124,4 +127,21 @@ export const refreshTokens = pgTable('refresh_tokens', {
 }, (table) => [
     index('idx_refresh_tokens_user').on(table.userId),
     index('idx_refresh_tokens_token').on(table.token)
+])
+
+export const calls = pgTable('calls', {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id').notNull().references(()=> conversation.id),
+    callerId: uuid('caller_id').notNull().references(()=> users.id),
+    receiverId: uuid('receiver_id').references(()=> users.id),
+    type: callEnum('type').default('audio'),
+    status: callStatusEnum('status').default('missed'),
+    startedAt: timestamp('started_at'),
+    endedAt: timestamp('ended_at'),
+    duration: integer('duration')
+}, (table) => [
+    index('idx_calls_conversation').on(table.conversationId),
+    index('idx_calls_caller').on(table.callerId),
+    index('idx_calls_receiver').on(table.receiverId),
+    index('idx_calls_status').on(table.status),
 ])
