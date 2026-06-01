@@ -138,10 +138,22 @@ export const calls = pgTable('calls', {
     status: callStatusEnum('status').default('missed'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
-    duration: integer('duration')
+    duration: integer('duration'),
+    createdAt: timestamp('created_at').defaultNow()
 }, (table) => [
     index('idx_calls_conversation').on(table.conversationId),
     index('idx_calls_caller').on(table.callerId),
     index('idx_calls_receiver').on(table.receiverId),
     index('idx_calls_status').on(table.status),
+])
+
+export const callParticipants = pgTable('call_participants', {
+    id:       uuid('id').primaryKey().defaultRandom(),
+    callId:   uuid('call_id').notNull().references(() => calls.id, { onDelete: 'cascade' }),
+    userId:   uuid('user_id').notNull().references(() => users.id),
+    joinedAt: timestamp('joined_at').defaultNow(),
+    leftAt:   timestamp('left_at'),
+}, (table) => [
+    index('idx_call_participants_call').on(table.callId),
+    index('idx_call_participants_user').on(table.userId),
 ])
