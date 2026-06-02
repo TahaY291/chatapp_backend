@@ -17,13 +17,13 @@ export const uploadMessageFile = multer({ storage ,limits: {
         fileSize: 50 * 1024 * 1024,
     }, fileFilter: (req, file , cb)=> {
  const allowedTypes = [
-            // images
+
             "image/jpeg", "image/png", "image/webp", "image/gif",
-            // videos
+
             "video/mp4", "video/webm", "video/quicktime",
-            // audio
+
             "audio/mpeg", "audio/wav", "audio/ogg", "audio/webm",
-            // documents
+
             "application/pdf",
             "application/msword",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
