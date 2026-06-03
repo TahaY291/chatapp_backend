@@ -179,31 +179,79 @@ export const refreshAccessToken = asyncHandler(async (req: Request, res: Respons
 export const verifyEmail = asyncHandler(async (req, res) => {
     const userId = req.user!.id
     const { otp } = req.body
-    const userArr = await db.select().from(users).where(eq(users.id , userId))
-    const user = userArr[0] 
-    if (!user) {
-        throw new ApiError(404, "User not found")
+
+    const userArr = await db.select().from(users).where(eq(users.id, userId))
+    const user = userArr[0]
+
+    if (!user) throw new ApiError(404, "User not found")
+    if (user.isVerified) throw new ApiError(400, "User already verified")
+    if (!user.verifyOTP || !user.verifyOTPExpiry || user.verifyOTPExpiry < new Date()) {
+        throw new ApiError(400, "OTP expired or not found — please request a new one")
     }
-    if (user.isVerified) {
-        throw new ApiError(400, "User already verified")
-    }
-   if (!user.verifyOTP || !user.verifyOTPExpiry || user.verifyOTPExpiry < new Date()) {
-    throw new ApiError(400, "OTP expired or not found — please request a new one")
-}
-    if (user.verifyOTP !== String(otp)) {
-        throw new ApiError(400, "Invalid OTP")
-    }
+    if (user.verifyOTP !== String(otp)) throw new ApiError(400, "Invalid OTP")
 
     await db.update(users).set({
-        
         isVerified: true,
         verifyOTP: null,
         verifyOTPExpiry: null
-    }).where(eq(users.id ,userId))
+    }).where(eq(users.id, userId))
 
-    res.status(200).json(new ApiResponse(200, null, "Email verified successfully"))
+    const { accessToken, refreshToken } = await generateAccessAndRefreshToken(user.id)
+
+    const { passwordHash, verifyOTP, verifyOTPExpiry,
+            resetOTP, resetOTPExpiry, ...loggedInUser } = user
+
+    // manually set isVerified true since user object is from before update
+    const finalUser = { ...loggedInUser, isVerified: true }
+
+    const options: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none"
+    }
+
+    return res.status(200)
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(new ApiResponse(200, { user: finalUser }, "Email verified successfully"))
 })
 
+export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Response) => {
+    const userId = req.user!.id
+
+    const checkUserExistArr = await db.select().from(users).where(eq(users.id, userId))
+    const user = checkUserExistArr[0]
+
+    if (!user) throw new ApiError(404, "User not found")
+
+    // ✅ check not already verified
+    if (user.isVerified) throw new ApiError(400, "User is already verified")
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString()
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000)
+
+    await db.update(users)
+        .set({ verifyOTP: otp, verifyOTPExpiry: otpExpiry })
+        .where(eq(users.id, userId))
+
+    const mailOptions = {
+        from: process.env.SENDER_EMAIL,
+        to: user.email,
+        subject: "Verify your email - ChatApp",
+        text: `Your new verification OTP is: ${otp}. It expires in 10 minutes.`,
+    }
+
+    // ✅ throw if email fails
+    try {
+        await transporter.sendMail(mailOptions)
+    } catch (emailError) {
+        throw new ApiError(500, "Failed to send OTP email — please try again")
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, null, "OTP resent successfully. Please check your email.")
+    )
+})
 export const uploadUserAvatar = asyncHandler(async(req : Request, res: Response )=>{
     const userId = req.user!.id
 
