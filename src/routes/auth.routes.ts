@@ -10,7 +10,8 @@ import {
     uploadUserAvatar,
     updateUsernameAndBio,
     sendResetPasswordOTP,
-    verifyResetPassword
+    verifyResetPassword,
+    getMe
 } from "../controllers/auth.controller";
 import { validate } from "../middlewares/validate.middleware";
 import { 
@@ -32,8 +33,8 @@ router.route('/login').post(validate(loginSchema), loginUser)
 router.route('/logout').post(verifyUser, logoutUser)
 router.route('/refresh-token').post(refreshAccessToken)
 
-router.route('/verify-email').post(verifyUser, validate(verifyEmailSchema), verifyEmail)
-router.route('/resend-otp').post(verifyUser, resendVerifyOtpForEmail)
+router.route('/verify-email').post(validate(verifyEmailSchema), verifyEmail)
+router.route('/resend-otp').post(resendVerifyOtpForEmail)
 
 router.route('/upload-avatar').patch(verifyUser, uploadAvatar.single("file"), uploadUserAvatar)
 router.route('/update-profile').patch(verifyUser, validate(updateProfileSchema), updateUsernameAndBio)
@@ -42,5 +43,6 @@ router.route('/forgot-password').post(validate(forgotPasswordSchema), sendResetP
 router.route('/reset-password').post(validate(resetPasswordSchema), verifyResetPassword)
 
 router.route('/search').get(verifyUser, searchUserByEmail)
+router.route('/me').get(verifyUser, getMe)
 
 export default router

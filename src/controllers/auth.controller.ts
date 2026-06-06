@@ -177,10 +177,9 @@ export const refreshAccessToken = asyncHandler(async (req: Request, res: Respons
 })
 
 export const verifyEmail = asyncHandler(async (req, res) => {
-    const userId = req.user!.id
-    const { otp } = req.body
+    const { otp, email } = req.body  // ← email from body, no req.user
 
-    const userArr = await db.select().from(users).where(eq(users.id, userId))
+    const userArr = await db.select().from(users).where(eq(users.email, email))
     const user = userArr[0]
 
     if (!user) throw new ApiError(404, "User not found")
@@ -194,14 +193,13 @@ export const verifyEmail = asyncHandler(async (req, res) => {
         isVerified: true,
         verifyOTP: null,
         verifyOTPExpiry: null
-    }).where(eq(users.id, userId))
+    }).where(eq(users.email, email))  // ← use email not userId
 
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(user.id)
 
     const { passwordHash, verifyOTP, verifyOTPExpiry,
             resetOTP, resetOTPExpiry, ...loggedInUser } = user
 
-    // manually set isVerified true since user object is from before update
     const finalUser = { ...loggedInUser, isVerified: true }
 
     const options: CookieOptions = {
@@ -213,18 +211,17 @@ export const verifyEmail = asyncHandler(async (req, res) => {
     return res.status(200)
         .cookie("accessToken", accessToken, options)
         .cookie("refreshToken", refreshToken, options)
+        .cookie("isVerified", "true", options)
         .json(new ApiResponse(200, { user: finalUser }, "Email verified successfully"))
 })
 
 export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Response) => {
-    const userId = req.user!.id
+    const { email } = req.body  // ← email from body, no req.user
 
-    const checkUserExistArr = await db.select().from(users).where(eq(users.id, userId))
+    const checkUserExistArr = await db.select().from(users).where(eq(users.email, email))
     const user = checkUserExistArr[0]
 
     if (!user) throw new ApiError(404, "User not found")
-
-    // ✅ check not already verified
     if (user.isVerified) throw new ApiError(400, "User is already verified")
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
@@ -232,7 +229,7 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
 
     await db.update(users)
         .set({ verifyOTP: otp, verifyOTPExpiry: otpExpiry })
-        .where(eq(users.id, userId))
+        .where(eq(users.email, email))  // ← use email not userId
 
     const mailOptions = {
         from: process.env.SENDER_EMAIL,
@@ -241,7 +238,6 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
         text: `Your new verification OTP is: ${otp}. It expires in 10 minutes.`,
     }
 
-    // ✅ throw if email fails
     try {
         await transporter.sendMail(mailOptions)
     } catch (emailError) {
@@ -252,6 +248,8 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
         new ApiResponse(200, null, "OTP resent successfully. Please check your email.")
     )
 })
+
+
 export const uploadUserAvatar = asyncHandler(async(req : Request, res: Response )=>{
     const userId = req.user!.id
 
@@ -409,4 +407,17 @@ export const searchUserByEmail = asyncHandler(async(req : Request, res: Response
 
     return res.status(200).json(new ApiResponse(200 , usersEmailArr[0], "User fetched successfuly"))
 
+})
+export const getMe = asyncHandler(async(req, res)=>{
+    const userId = req.user!.id
+
+    const userExist = await db.select().from(users).where(eq(users.id , userId))
+    if (!userExist[0]) {
+        throw new ApiError(404 , "user not found")
+    }
+
+    const { passwordHash, verifyOTP, verifyOTPExpiry,
+            resetOTP, resetOTPExpiry, ...loggedInUser } = userExist[0]
+
+    return res.status(200).json(new ApiResponse(200 , loggedInUser , "User fetched successfuly"))
 })
