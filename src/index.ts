@@ -72,10 +72,6 @@ io.on("connection", (socket) => {
         })
     })
 
-    socket.on("send-message", (data: { roomId: string, message: Record<string, unknown> }) => {
-        const { roomId, message } = data
-        socket.to(roomId).emit("receive-message", message);
-    })
 
     socket.on("typing-start", ({ roomId }: { roomId: string }) => {
         socket.to(roomId).emit("typing:start", {
@@ -87,13 +83,6 @@ io.on("connection", (socket) => {
         socket.to(roomId).emit("typing:stop", {
             userId: socket.data.userId
         })
-    })
-
-    socket.on("message:read", ({ roomId, messageId }: { roomId: string; messageId: string }) => {
-        socket.to(roomId).emit("message:read", {
-            messageId,
-            readBy: socket.data.userId,
-        });
     })
 
     socket.on("webrtc:offer", (data: { roomId: string; offer: RTCSessionDescriptionInit }) => {
@@ -111,13 +100,6 @@ io.on("connection", (socket) => {
         socket.to(data.roomId).emit("webrtc:ice-candidate", data.candidate);
     })
 
-    socket.on("webrtc:call-ended", ({ roomId }: { roomId: string }) => {
-        socket.to(roomId).emit("webrtc:call-ended");
-    })
-
-    socket.on("webrtc:call-rejected", ({ roomId }: { roomId: string }) => {
-        socket.to(roomId).emit("webrtc:call-rejected");
-    })
 
     socket.on("disconnect", () => {
         const userId = socket.data.userId as string | undefined;
