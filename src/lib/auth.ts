@@ -3,6 +3,7 @@ import  jwt , {Secret , SignOptions} from 'jsonwebtoken'
 import { db } from '../db'
 import { users , refreshTokens } from '../db/schema'
 import { eq } from 'drizzle-orm'
+import { ApiError } from './ApiError'
 
 export const bcryptPassword = async (password: string) : Promise<string> =>{
     return await bcrypt.hash(password , 10)
@@ -60,8 +61,15 @@ export const deleteAllRefreshToken = async (userId: string): Promise<void> => {
 
 export const verifyRefreshToken = async (token: string) => {
     
-    const decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as { id: string };
-
+    let decoded: { id: string }
+  try {
+    decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as { id: string }
+  } catch (err) {
+    if (err instanceof jwt.TokenExpiredError) {
+      throw new ApiError(401, "Refresh token expired")  // ✅ 401 not 500
+    }
+    throw new ApiError(401, "Invalid refresh token")
+  }
     const storedToken = await db.query.refreshTokens.findFirst({
         where: eq(refreshTokens.token, token),
     });

@@ -18,7 +18,7 @@ const generateAccessAndRefreshToken = async (userId: string) => {
             throw new ApiError(404, "User not found")
         }
 
-        const accessToken = generateAccessToken({email: user.email ,username: user.username ,id: user.id})
+        const accessToken = generateAccessToken({ email: user.email, username: user.username, id: user.id })
         const refreshToken = generateRefreshToken(userId)
 
         await db.insert(refreshTokens).values({
@@ -28,6 +28,7 @@ const generateAccessAndRefreshToken = async (userId: string) => {
         })
         return { accessToken, refreshToken }
     } catch (error) {
+        if (error instanceof ApiError) throw error
         throw new ApiError(500, "Failed to generate tokens")
     }
 }
@@ -76,7 +77,7 @@ export const registerUser = asyncHandler(
         });
 
         const { passwordHash, verifyOTP, verifyOTPExpiry,
-                resetOTP, resetOTPExpiry, ...safeUser } = createdUser;
+            resetOTP, resetOTPExpiry, ...safeUser } = createdUser;
 
         return res.status(201).json(
             new ApiResponse(201, safeUser, "User registered successfully. Please check your email for OTP.")
@@ -89,7 +90,7 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
 
     const existingUser = await db.select().from(users).where(eq(users.email, email))
     if (!existingUser[0]) {
-        throw new ApiError(401, "User not found")
+        throw new ApiError(404, "User not found")
     }
 
     if (!existingUser[0].isVerified) {
@@ -104,12 +105,12 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(existingUser[0].id)
 
     const { passwordHash, verifyOTP, verifyOTPExpiry,
-            resetOTP, resetOTPExpiry, ...loggedInUser } = existingUser[0]
+        resetOTP, resetOTPExpiry, ...loggedInUser } = existingUser[0]
 
     const options: CookieOptions = {
         httpOnly: true,
-        secure: true,
-        sameSite: "none"
+        secure: false,
+        sameSite: "lax"
     }
 
     return res.status(200)
@@ -119,18 +120,18 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
 })
 
 export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
-    const incomingToken =  req.cookies?.refreshToken || req.body?.refreshToken || req.header('Authorization')?.replace("Bearer ", "")
+    const incomingToken = req.cookies?.refreshToken || req.body?.refreshToken || req.header('Authorization')?.replace("Bearer ", "")
 
 
     if (!incomingToken) {
-        throw new ApiError(401 , "Unauthorized _ refresh token is missing" )
+        throw new ApiError(401, "Unauthorized _ refresh token is missing")
     }
     await db.delete(refreshTokens).where(eq(refreshTokens.token, incomingToken))
 
     const options: CookieOptions = {
         httpOnly: true,
-        secure: true,
-        sameSite: "none"
+        secure: false,
+        sameSite: "lax"
     }
 
     return res.status(200)
@@ -166,8 +167,8 @@ export const refreshAccessToken = asyncHandler(async (req: Request, res: Respons
 
     const options: CookieOptions = {
         httpOnly: true,
-        secure: true,
-        sameSite: "none"
+        secure: false,
+        sameSite: "lax"
     }
 
     return res.status(200)
@@ -198,14 +199,14 @@ export const verifyEmail = asyncHandler(async (req, res) => {
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(user.id)
 
     const { passwordHash, verifyOTP, verifyOTPExpiry,
-            resetOTP, resetOTPExpiry, ...loggedInUser } = user
+        resetOTP, resetOTPExpiry, ...loggedInUser } = user
 
     const finalUser = { ...loggedInUser, isVerified: true }
 
     const options: CookieOptions = {
         httpOnly: true,
-        secure: true,
-        sameSite: "none"
+        secure: false,
+        sameSite: "lax"
     }
 
     return res.status(200)
@@ -250,21 +251,21 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
 })
 
 
-export const uploadUserAvatar = asyncHandler(async(req : Request, res: Response )=>{
+export const uploadUserAvatar = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.id
 
-    const existingUserArr = await db.select().from(users).where(eq(users.id , userId))
+    const existingUserArr = await db.select().from(users).where(eq(users.id, userId))
     const existinguser = existingUserArr[0]
 
     if (!existinguser) {
-        throw new ApiError(404 , "User not found")
+        throw new ApiError(404, "User not found")
     }
     if (!existinguser.isVerified) {
-        throw new ApiError(401 , "User is not verified")
+        throw new ApiError(401, "User is not verified")
     }
 
     if (!req.file) {
-        throw new ApiError(400 , "no file upload")
+        throw new ApiError(400, "no file upload")
     }
 
     if (existinguser.avatarUrl) {
@@ -274,7 +275,7 @@ export const uploadUserAvatar = asyncHandler(async(req : Request, res: Response 
         }
     }
 
-      const result = await uploadOnCloudinary(req.file.buffer, "avatars")
+    const result = await uploadOnCloudinary(req.file.buffer, "avatars")
     if (!result) {
         throw new ApiError(500, "Failed to upload avatar")
     }
@@ -316,27 +317,27 @@ export const updateUsernameAndBio = asyncHandler(async (req: Request, res: Respo
         .returning()
 
     const { passwordHash, verifyOTP, verifyOTPExpiry,
-            resetOTP, resetOTPExpiry, ...safeUser } = updatedUserArr[0]
+        resetOTP, resetOTPExpiry, ...safeUser } = updatedUserArr[0]
 
     res.status(200).json(new ApiResponse(200, safeUser, "Profile updated successfully"))
 })
 
 export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Response) => {
     const { email } = req.body as ForgotPasswordInput
-    
+
     const usersArr = await db.select().from(users).where(eq(users.email, email))
     const user = usersArr[0]
 
     if (!user) {
         throw new ApiError(404, "User not found")
     }
-    
+
     const otp = String(Math.floor(100000 + Math.random() * 900000))
 
     await db.update(users).set({
         resetOTP: otp,
         resetOTPExpiry: new Date(Date.now() + 10 * 60 * 1000),
-    }).where(eq(users.email , email))
+    }).where(eq(users.email, email))
 
 
     const mailOptions = {
@@ -349,9 +350,9 @@ export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Respo
         await transporter.sendMail(mailOptions)
     } catch (error) {
         await db.update(users).set({
-        resetOTP: null,
-        resetOTPExpiry: null,
-    }).where(eq(users.email , email))
+            resetOTP: null,
+            resetOTPExpiry: null,
+        }).where(eq(users.email, email))
         throw new ApiError(500, "Failed to send OTP email")
     }
     res.status(200).json(new ApiResponse(200, null, "OTP sent to email successfully"))
@@ -359,7 +360,7 @@ export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Respo
 
 export const verifyResetPassword = asyncHandler(async (req, res) => {
     const { email, otp, newPassword } = req.body as ResetPasswordInput
-    
+
     const usersArr = await db.select().from(users).where(eq(users.email, email))
     const user = usersArr[0]
     if (!user) {
@@ -385,39 +386,39 @@ export const verifyResetPassword = asyncHandler(async (req, res) => {
     res.status(200).json(new ApiResponse(200, null, "OTP verified successfully"))
 })
 
-export const searchUserByEmail = asyncHandler(async(req : Request, res: Response)=> {
+export const searchUserByEmail = asyncHandler(async (req: Request, res: Response) => {
     const email = req.query.email as string
 
     if (!email) {
-        throw new ApiError(400 , "Email is required")
+        throw new ApiError(400, "Email is required")
     }
 
     const usersEmailArr = await db.select({
-         id:        users.id,
-        username:  users.username,
-        email:     users.email,
+        id: users.id,
+        username: users.username,
+        email: users.email,
         avatarUrl: users.avatarUrl,
-        about:     users.about,
-        isOnline:  users.isOnline,
-    }).from(users).where(eq(users.email , email))
+        about: users.about,
+        isOnline: users.isOnline,
+    }).from(users).where(eq(users.email, email))
 
     if (!usersEmailArr[0]) {
-        throw new ApiError(404 , "User not exist with this email")
+        throw new ApiError(404, "User not exist with this email")
     }
 
-    return res.status(200).json(new ApiResponse(200 , usersEmailArr[0], "User fetched successfuly"))
+    return res.status(200).json(new ApiResponse(200, usersEmailArr[0], "User fetched successfuly"))
 
 })
-export const getMe = asyncHandler(async(req, res)=>{
+export const getMe = asyncHandler(async (req, res) => {
     const userId = req.user!.id
 
-    const userExist = await db.select().from(users).where(eq(users.id , userId))
+    const userExist = await db.select().from(users).where(eq(users.id, userId))
     if (!userExist[0]) {
-        throw new ApiError(404 , "user not found")
+        throw new ApiError(404, "user not found")
     }
 
     const { passwordHash, verifyOTP, verifyOTPExpiry,
-            resetOTP, resetOTPExpiry, ...loggedInUser } = userExist[0]
+        resetOTP, resetOTPExpiry, ...loggedInUser } = userExist[0]
 
-    return res.status(200).json(new ApiResponse(200 , loggedInUser , "User fetched successfuly"))
+    return res.status(200).json(new ApiResponse(200, loggedInUser, "User fetched successfuly"))
 })
