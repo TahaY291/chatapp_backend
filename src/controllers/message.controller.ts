@@ -11,121 +11,102 @@ import { alias } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm";
 
 export const insertMessage = asyncHandler(async (req: Request, res: Response) => {
-    const { receiverEmail, content } = req.body
+    const { conversationId, content, replyToId } = req.body
     const senderId = req.user!.id
+    
+    if (!conversationId) throw new ApiError(400, "Conversation ID is required")
+    if (!content && !req.file) throw new ApiError(400, "Message content or file is required")
 
-    // validate at least one of content or file
-    if (!content && !req.file) {
-        throw new ApiError(400, "Message content or file is required")
+    const [participantsArr, repliedMessageArr] = await Promise.all([
+        db.select({ userId: conversationParticipants.userId })
+            .from(conversationParticipants)
+            .where(eq(conversationParticipants.conversationId, conversationId)),
+
+        replyToId
+            ? db.select({ id: messages.id })
+                .from(messages)
+                .where(and(
+                    eq(messages.id, replyToId),
+                    eq(messages.conversationId, conversationId)
+                ))
+            : Promise.resolve([])
+    ])
+    if (participantsArr.length === 0) throw new ApiError(404, "Conversation not found")
+
+    const isMember = participantsArr.some(p => p.userId === senderId)
+    if (!isMember) throw new ApiError(403, "You are not a member of this conversation")
+
+    const receiver = participantsArr.find(p => p.userId !== senderId)
+    if (!receiver) throw new ApiError(404, "Receiver not found")
+
+    if (replyToId && !repliedMessageArr[0]) {
+        throw new ApiError(404, "Replied message not found in this conversation")
     }
 
-    // get receiver by email
-    const receiverArr = await db.select().from(users).where(eq(users.email, receiverEmail))
-    const receiver = receiverArr[0]
-    if (!receiver) {
-        throw new ApiError(404, "Receiver not found")
-    }
-
-    // check if conversation exists
-    const existingConversation = await db
-        .select({ conversationId: conversationParticipants.conversationId })
-        .from(conversationParticipants)
-        .innerJoin(conversation, eq(conversationParticipants.conversationId, conversation.id))
-        .where(
-            and(
-                eq(conversation.type, "direct"),
-                or(
-                    eq(conversationParticipants.userId, senderId),
-                    eq(conversationParticipants.userId, receiver.id)
-                )
-            )
-        )
-        .groupBy(conversationParticipants.conversationId)
-        .having(eq(count(conversationParticipants.userId), 2))
-
-    const existingConversationId = existingConversation[0]?.conversationId
-    let currentConversationId: string
-
-    if (!existingConversationId) {
-        // create new conversation
-        const newConversationArr = await db.insert(conversation).values({
-            createdBy: senderId,
-            type: "direct"
-        }).returning()
-        const newConversation = newConversationArr[0]
-        currentConversationId = newConversation.id
-
-        // add participants
-        await db.insert(conversationParticipants).values({
-            conversationId: newConversation.id,
-            userId: senderId
-        }).onConflictDoNothing()
-
-        await db.insert(conversationParticipants).values({
-            conversationId: newConversation.id,
-            userId: receiver.id
-        }).onConflictDoNothing()
-
-        // add contacts both ways
-        await db.insert(contacts).values({
-            ownerId: senderId,
-            contactId: receiver.id
-        }).onConflictDoNothing()
-
-        await db.insert(contacts).values({
-            ownerId: receiver.id,
-            contactId: senderId
-        }).onConflictDoNothing()
-
-    } else {
-        currentConversationId = existingConversationId
-    }
-
-    // handle file upload
-    let mediaUrl = null
-    let messageType = "text"
+    let messageType: "text" | "image" | "video" | "audio" | "file" = "text"
 
     if (req.file) {
-        const result = await uploadOnCloudinary(req.file.buffer, "messages")
-        if (!result) throw new ApiError(500, "Failed to upload file")
-        mediaUrl = result.secure_url
-
-        if (req.file.mimetype.startsWith("image/")) messageType = "image"
+        if (req.file.mimetype.startsWith("image/"))      messageType = "image"
         else if (req.file.mimetype.startsWith("video/")) messageType = "video"
         else if (req.file.mimetype.startsWith("audio/")) messageType = "audio"
-        else messageType = "file"
+        else                                              messageType = "file"
     }
 
-    // insert message
-    const newMessage = await db.insert(messages).values({
-        conversationId: currentConversationId,
-        senderId: senderId,
-        content: content || null,
-        mediaUrl: mediaUrl || null,
-        type: messageType as any
-    }).returning()
+    const [newMessage] = await db
+        .insert(messages)
+        .values({
+            conversationId,
+            senderId,
+            content:    content    || null,
+            mediaUrl:   req.file   ? "uploading" : null,
+            type:       messageType,
+            replyToId:  replyToId  || null,
+        })
+        .returning()
 
-    // insert message status for receiver
-    await db.insert(messageStatus).values({
-        messageId: newMessage[0].id,
-        userId: receiver.id,
-        status: "sent"
-    })
-
-    // update lastMessageAt
-    await db.update(conversation)
-        .set({ updatedAt: new Date() })
-        .where(eq(conversation.id, currentConversationId))
-
-    // emit to receiver if online
-    const receiverSocketId = onlineUsers.get(receiver.id)
+    const receiverSocketId = onlineUsers.get(receiver.userId)
     if (receiverSocketId) {
-        io.to(receiverSocketId).emit("receive-message", newMessage[0])
-    }
+        io.to(receiverSocketId).emit("receive-message", newMessage)
+    }    res.status(201).json(new ApiResponse(201, newMessage, "Message sent successfully"))
 
-    return res.status(201).json(
-        new ApiResponse(201, newMessage[0], "Message sent successfully")
-    )
+    Promise.all([
+        db.insert(messageStatus).values({
+            messageId: newMessage.id,
+            userId:    receiver.userId,
+            status:    "sent",
+        }),
+        db.update(conversation)
+            .set({ updatedAt: new Date() })
+            .where(eq(conversation.id, conversationId))
+    ]).catch(err => console.error("Post-response DB ops failed:", err))
+
+    if (req.file) {
+        const fileBuffer = req.file.buffer
+
+        uploadOnCloudinary(fileBuffer, "messages")
+            .then(async (result) => {
+                if (!result) {
+                    console.error("Cloudinary upload returned null")
+                    return
+                }
+
+                const [updatedMessage] = await db
+                    .update(messages)
+                    .set({ mediaUrl: result.secure_url })
+                    .where(eq(messages.id, newMessage.id))
+                    .returning()
+
+                const senderSocketId = onlineUsers.get(senderId)
+
+                if (receiverSocketId) {
+                    io.to(receiverSocketId).emit("message-updated", updatedMessage)
+                }
+                if (senderSocketId) {
+                    io.to(senderSocketId).emit("message-updated", updatedMessage)
+                }
+            })
+            .catch(err => console.error("Cloudinary upload failed:", err))
+    }
 })
 
 export const getMessages = asyncHandler(async (req: Request, res: Response) => {
@@ -138,37 +119,37 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
 
 
     const participant = await db.select()
-    .from(conversationParticipants)
-    .where(
-        and(
-            eq(conversationParticipants.conversationId, conversationId),
-            eq(conversationParticipants.userId, senderId)
+        .from(conversationParticipants)
+        .where(
+            and(
+                eq(conversationParticipants.conversationId, conversationId),
+                eq(conversationParticipants.userId, senderId)
+            )
         )
-    )
 
     if (!participant[0]) {
         throw new ApiError(403, "You are not a participant of this conversation")
     }
-    
-    const otherParticipantArr = await db.select().from(conversationParticipants).where(and(
-            eq(conversationParticipants.conversationId , conversationId),
-            ne(conversationParticipants.userId, senderId)
-        ))
-        const otherParticipantId = otherParticipantArr[0].userId
 
-        const isBlockedArr = await db.select().from(blockedUsers).where(
-            or(
-                and(
-                    eq(blockedUsers.blockerId , senderId),
-                    eq(blockedUsers.blockedId, otherParticipantId)
-                ),
-                and(
-                    eq(blockedUsers.blockerId , otherParticipantId),
-                    eq(blockedUsers.blockedId, senderId)
-                ),
-            )
+    const otherParticipantArr = await db.select().from(conversationParticipants).where(and(
+        eq(conversationParticipants.conversationId, conversationId),
+        ne(conversationParticipants.userId, senderId)
+    ))
+    const otherParticipantId = otherParticipantArr[0].userId
+
+    const isBlockedArr = await db.select().from(blockedUsers).where(
+        or(
+            and(
+                eq(blockedUsers.blockerId, senderId),
+                eq(blockedUsers.blockedId, otherParticipantId)
+            ),
+            and(
+                eq(blockedUsers.blockerId, otherParticipantId),
+                eq(blockedUsers.blockedId, senderId)
+            ),
         )
-        const isBlocked = isBlockedArr[0]
+    )
+    const isBlocked = isBlockedArr[0]
 
 
 
@@ -322,6 +303,7 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
         .where(eq(myParticipation.userId, currentUserId))
         .orderBy(desc(conversation.updatedAt))
 
+    console.log("conversations raw:", JSON.stringify(conversations, null, 2))
     return res.status(200).json(
         new ApiResponse(200, conversations, "Conversations fetched successfully")
     )

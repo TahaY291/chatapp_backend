@@ -33,7 +33,6 @@ export const createConversation = asyncHandler(async (req: Request, res: Respons
             )
         )
         .then(rows => {
-            // filter to find one where participantId is also a member
             return rows.find(async (row) => {
                 const other = await db
                     .select()
