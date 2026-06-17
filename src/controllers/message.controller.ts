@@ -13,9 +13,9 @@ import { sql } from "drizzle-orm";
 export const insertMessage = asyncHandler(async (req: Request, res: Response) => {
     const { conversationId, content, replyToId } = req.body
     const senderId = req.user!.id
-    
+
     if (!conversationId) throw new ApiError(400, "Conversation ID is required")
-    if (!content && !req.file) throw new ApiError(400, "Message content or file is required")
+    // if (!content || !req.file) throw new ApiError(400, "Message content or file is required")
 
     const [participantsArr, repliedMessageArr] = await Promise.all([
         db.select({ userId: conversationParticipants.userId })

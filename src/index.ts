@@ -7,6 +7,7 @@ import contactRouter from '../src/routes/contact.routes'
 import groupRouter from '../src/routes/group.routes'
 import messageRouter from '../src/routes/messages.routes'
 import conversationRouter from '../src/routes/conversation.routes'
+import callRouter from '../src/routes/call.routes'
 import { Server } from "socket.io";
 import http from 'http'
 
@@ -32,6 +33,7 @@ app.use('/message', messageRouter)
 app.use('/group', groupRouter)
 app.use('/contact', contactRouter)
 app.use('/conversation', conversationRouter)
+app.use('/call', callRouter)
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });
 });
@@ -87,21 +89,29 @@ io.on("connection", (socket) => {
         })
     })
 
-    socket.on("webrtc:offer", (data: { roomId: string; offer: RTCSessionDescriptionInit }) => {
-        socket.to(data.roomId).emit("webrtc:offer", {
-            offer: data.offer,
-            from: socket.id,
-        });
+    socket.on("webrtc:offer", (data: { callId: string; offer: RTCSessionDescriptionInit; targetUserId: string }) => {
+        const targetSocketId = onlineUsers.get(data.targetUserId)
+        if (targetSocketId) {
+            io.to(targetSocketId).emit("webrtc:offer", {
+                offer: data.offer,
+                callId: data.callId,
+            })
+        }
     })
 
-    socket.on("webrtc:answer", (data: { roomId: string; answer: RTCSessionDescriptionInit }) => {
-        socket.to(data.roomId).emit("webrtc:answer", data.answer);
+    socket.on("webrtc:answer", (data: { callId: string; answer: RTCSessionDescriptionInit; targetUserId: string }) => {
+        const targetSocketId = onlineUsers.get(data.targetUserId)
+        if (targetSocketId) {
+            io.to(targetSocketId).emit("webrtc:answer", { answer: data.answer, callId: data.callId })
+        }
     })
 
-    socket.on("webrtc:ice-candidate", (data: { roomId: string; candidate: RTCIceCandidateInit }) => {
-        socket.to(data.roomId).emit("webrtc:ice-candidate", data.candidate);
+    socket.on("webrtc:ice-candidate", (data: { callId: string; candidate: RTCIceCandidateInit; targetUserId: string }) => {
+        const targetSocketId = onlineUsers.get(data.targetUserId)
+        if (targetSocketId) {
+            io.to(targetSocketId).emit("webrtc:ice-candidate", { candidate: data.candidate, callId: data.callId })
+        }
     })
-
 
     socket.on("disconnect", () => {
         const userId = socket.data.userId as string | undefined;
@@ -112,9 +122,9 @@ io.on("connection", (socket) => {
                 console.log(`User offline: ${userId}`);
             }
         }
-    }) 
+    })
 
-}) 
+})
 
 export { io };
 

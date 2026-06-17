@@ -27,10 +27,19 @@ export const callInitiate = asyncHandler(async (req: Request, res: Response) => 
         throw new ApiError(403, "You are not allowed to make this call")
     }
 
+    // fetch caller info — needed for the incoming call notification
+    const callerArr = await db.select({
+        id: users.id,
+        username: users.username,
+        avatarUrl: users.avatarUrl,
+    }).from(users).where(eq(users.id, callerId))
+
+    const caller = callerArr[0]
+    if (!caller) throw new ApiError(404, "Caller not found")
+
     const allParticipantsArr = await db.select()
         .from(conversationParticipants)
         .where(eq(conversationParticipants.conversationId, conversationId))
-
 
     const conversationArr = await db.select()
         .from(conversation)
@@ -61,6 +70,8 @@ export const callInitiate = asyncHandler(async (req: Request, res: Response) => 
                 io.to(socketId).emit("call:incoming", {
                     callId: newCall.id,
                     callerId,
+                    callerName: caller.username,      // ← add this
+                    callerAvatar: caller.avatarUrl,    // ← add this
                     type: callType,
                     conversationId
                 })
@@ -69,7 +80,7 @@ export const callInitiate = asyncHandler(async (req: Request, res: Response) => 
     })
 
     return res.status(201).json(
-        new ApiResponse(201, { callId: newCall.id }, "Call initiated successfully")
+        new ApiResponse(201, { callId: newCall.id, callerId }, "Call initiated successfully")
     )
 })
 export const acceptCall = asyncHandler(async (req, res) => {
@@ -131,7 +142,6 @@ return res.status(200).json(
     new ApiResponse(200, { callId }, "Call accepted successfully")
 )
 })
-
 export const rejectCall = asyncHandler(async (req, res) => {
     const callId = req.params.callId as string
     const userId = req.user!.id
@@ -180,7 +190,6 @@ return res.status(200).json(
     new ApiResponse(200, { callId }, "Call rejected")
 )
 })
-
 export const endedCall = asyncHandler(async (req : Request , res:Response)=>{
     const callId = req.params.callId as string
     const userId = req.user!.id
@@ -288,7 +297,6 @@ if (call.receiverId) {
         new ApiResponse(200, null, "Call ended successfully")
     )
 })
-
 export const getUserCallHistory = asyncHandler(async(req: Request, res: Response)=>{
     const userId = req.user!.id
 

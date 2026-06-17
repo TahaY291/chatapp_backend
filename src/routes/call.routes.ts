@@ -6,10 +6,10 @@ import { callInitiate , acceptCall , rejectCall , endedCall , getUserCallHistory
 const router = Router()
 
 
-router.route('initiate').post(verifyUser , callInitiate)
-router.route('accpet').patch(verifyUser , acceptCall)
-router.route('reject').patch(verifyUser , rejectCall)
-router.route('ended').patch(verifyUser , endedCall)
+router.route('/initiate').post(verifyUser , callInitiate)
+router.route('/:callId/accept').patch(verifyUser , acceptCall)
+router.route('/:callId/reject').patch(verifyUser , rejectCall)
+router.route('/:callId/end').patch(verifyUser , endedCall)
 router.route('calls').get(verifyUser , getUserCallHistory)
 
 
