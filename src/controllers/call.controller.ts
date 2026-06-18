@@ -27,7 +27,6 @@ export const callInitiate = asyncHandler(async (req: Request, res: Response) => 
         throw new ApiError(403, "You are not allowed to make this call")
     }
 
-    // fetch caller info — needed for the incoming call notification
     const callerArr = await db.select({
         id: users.id,
         username: users.username,
