@@ -113,12 +113,21 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
         sameSite: "lax"
     }
 
-    return res.status(200)
+    const res1 = res.status(200)
         .cookie("accessToken", accessToken, options)
         .cookie("refreshToken", refreshToken, options)
-        .json(new ApiResponse(200, { loggedInUser, accessToken, refreshToken }, "User logged in successfully"))
-})
+        .cookie("isVerified", String(loggedInUser.isVerified), options)
+    if (!loggedInUser.isVerified) {
+        res1.cookie("email", loggedInUser.email, {
+            httpOnly: true,
+            secure: true,
+            sameSite: "lax",
+            maxAge: 10 * 60 * 1000
+        })
+    }
 
+    return res1.json(new ApiResponse(200, { loggedInUser, accessToken, refreshToken }, "User logged in successfully"))
+})
 export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
     const incomingToken = req.cookies?.refreshToken || req.body?.refreshToken || req.header('Authorization')?.replace("Bearer ", "")
 
@@ -213,6 +222,7 @@ export const verifyEmail = asyncHandler(async (req, res) => {
         .cookie("accessToken", accessToken, options)
         .cookie("refreshToken", refreshToken, options)
         .cookie("isVerified", "true", options)
+        .clearCookie("email", options)
         .json(new ApiResponse(200, { user: finalUser }, "Email verified successfully"))
 })
 

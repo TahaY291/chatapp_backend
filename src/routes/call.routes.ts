@@ -10,7 +10,7 @@ router.route('/initiate').post(verifyUser , callInitiate)
 router.route('/:callId/accept').patch(verifyUser , acceptCall)
 router.route('/:callId/reject').patch(verifyUser , rejectCall)
 router.route('/:callId/end').patch(verifyUser , endedCall)
-router.route('calls').get(verifyUser , getUserCallHistory)
+router.route('/calls').get(verifyUser , getUserCallHistory)
 
 
 export default router;

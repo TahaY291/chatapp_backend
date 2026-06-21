@@ -219,26 +219,34 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
     const myParticipation = alias(conversationParticipants, "my_participation")
     const otherParticipation = alias(conversationParticipants, "other_participation")
 
-    const lastMessageSubquery = db
-        .select({
-            conversationId: messages.conversationId,
-            content: messages.content,
-            type: messages.type,
-            createdAt: messages.createdAt,
-        })
-        .from(messages)
-        .where(
-            eq(
-                messages.createdAt,
-                db
-                    .select({ maxDate: sql`MAX(${messages.createdAt})` })
-                    .from(messages)
-                    .where(eq(messages.conversationId, messages.conversationId))
-            )
-        )
-        .as("last_message")
+   // step 1 — max createdAt per conversation
+const latestPerConversation = db
+    .select({
+        conversationId: messages.conversationId,
+        maxCreatedAt: sql<Date>`MAX(${messages.createdAt})`.as("max_created_at")
+    })
+    .from(messages)
+    .groupBy(messages.conversationId)
+    .as("latest_per_conversation")
 
-    // ── subquery 2: unread count using messageStatus table ────────
+// step 2 — join back to get the full message row
+const lastMessageSubquery = db
+    .select({
+        conversationId: messages.conversationId,
+        content: messages.content,
+        type: messages.type,
+        createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .innerJoin(
+        latestPerConversation,
+        and(
+            eq(messages.conversationId, latestPerConversation.conversationId),
+            eq(messages.createdAt, latestPerConversation.maxCreatedAt)
+        )
+    )
+    .as("last_message")
+
     const unreadCountSubquery = db
         .select({
             conversationId: messages.conversationId,
@@ -303,7 +311,7 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
         .where(eq(myParticipation.userId, currentUserId))
         .orderBy(desc(conversation.updatedAt))
 
-    console.log("conversations raw:", JSON.stringify(conversations, null, 2))
+
     return res.status(200).json(
         new ApiResponse(200, conversations, "Conversations fetched successfully")
     )
