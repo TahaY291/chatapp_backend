@@ -17,7 +17,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 const allowedOrigins =
-    process.env.ALLOWED_ORIGINS?.split(",") || ["http://localhost:3000", "https://chatapp-frontend-theta-eight.vercel.app"];
+    process.env.ALLOWED_ORIGINS?.split(",") || ["https://chatapp-frontend-theta-eight.vercel.app"];
 
 app.use(cors({
     origin: allowedOrigins,
