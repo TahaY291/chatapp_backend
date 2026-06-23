@@ -121,7 +121,7 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
         res1.cookie("email", loggedInUser.email, {
             httpOnly: true,
             secure: true,
-            sameSite: "lax",
+            sameSite: "none",
             maxAge: 10 * 60 * 1000
         })
     }
