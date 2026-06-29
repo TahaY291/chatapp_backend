@@ -8,6 +8,7 @@ import groupRouter from './routes/group.routes'
 import messageRouter from './routes/messages.routes'
 import conversationRouter from './routes/conversation.routes'
 import callRouter from './routes/call.routes'
+import ragRouter from './routes/rag.routes'
 import { Server } from "socket.io";
 import http from 'http'
 
@@ -34,6 +35,7 @@ app.use('/group', groupRouter)
 app.use('/contact', contactRouter)
 app.use('/conversation', conversationRouter)
 app.use('/call', callRouter)
+app.use('/rag', ragRouter)
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });
 });

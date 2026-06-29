@@ -13,6 +13,7 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@langchain/textsplitters": "^1.0.1",
     "@neondatabase/serverless": "^1.1.0",
     "@types/nodemailer": "^8.0.0",
     "bcryptjs": "^3.0.3",
@@ -23,8 +24,12 @@
     "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.1.1",
+    "multer": "^2.2.0",
     "nodemailer": "^8.0.7",
+    "ollama": "^0.6.3",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^6.1.200",
+    "pg": "^8.22.0",
     "socket.io": "^4.8.3",
     "zod": "^4.4.3"
   },
@@ -36,6 +41,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/multer": "^2.1.0",
     "@types/node": "^25.9.1",
+    "@types/pdf-parse": "^1.1.5",
     "drizzle-kit": "^0.31.10",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
