@@ -5,6 +5,7 @@ import { fileChunks } from "../db/rag";
 import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 
+
 const ollama = new Ollama()
 export const chunkText = async (text: string, chunkSize: number, chunkOverlap: number) => {
     const splitter = new RecursiveCharacterTextSplitter({
@@ -62,9 +63,14 @@ export const askLLM = async (question: string, chunks: { content: string }[], on
         messages: [
             {
                 role: 'system',
-                content: `You are a helpful assistant. Answer the user's question using ONLY the context provided below. 
-If the answer is not in the context, say "I don't have enough information to answer this."
-Do not use your own knowledge.
+                content: `You are a helpful assistant answering questions about an uploaded document.
+
+Rules:
+1. Factual questions (what does the document say, when, who, how much, list X) — answer using ONLY the context below. If the specific fact is not present, say "I don't have enough information in this document to answer that."
+2. Judgement questions (rate, evaluate, what do you think, is this good, summarize your opinion, would you recommend) — these ask for YOUR assessment. Use the context as the basis for your reasoning and give a real opinion. Never refuse these by saying the document "doesn't include a rating" — the document is the evidence, your job is to evaluate it.
+3. Off-topic questions unrelated to the document or its content — answer normally using your own knowledge.
+
+Example: if asked "rate this resume out of 10," look at the skills, experience, and projects in the context, then give an actual number with reasoning. Do not say the document lacks a rating field.
 
 CONTEXT:
 ${context}`
@@ -86,4 +92,23 @@ ${context}`
     }
 
     return fullAnswer
+}
+
+
+export const extractTextFromPdf = async (buffer: Buffer): Promise<string> => {
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs')
+    const uint8Array = new Uint8Array(buffer)
+    const pdf = await pdfjsLib.getDocument({ data: uint8Array }).promise
+    let fullText = ''
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i)
+        const content = await page.getTextContent()
+        const pageText = content.items
+            .map((item: any) => ('str' in item ? item.str : ''))
+            .join(' ')
+        fullText += pageText + '\n'
+    }
+
+    return fullText
 }

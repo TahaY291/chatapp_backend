@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { asyncHandler } from "../lib/asyncHandler";
-import { askLLM, chunkText, embeddText, searchChunks } from "../utils/rag";
+import { askLLM, chunkText, embeddText, extractTextFromPdf, searchChunks } from "../utils/rag";
 import { db } from "../db";
 import { fileChunks, fileConversations, userFiles } from "../db/rag";
 import { uploadOnCloudinary } from "../utils/cloudinary";
@@ -22,15 +22,19 @@ export const ingestPdfFile = asyncHandler(async (req: Request, res: Response) =>
         return
     }
 
-    const pdfParse = require('pdf-parse') as (buffer: Buffer) => Promise<{ text: string }>
-    const data = await pdfParse(req.file.buffer)
-    const text = data.text
+
+    const text = await extractTextFromPdf(req.file.buffer)
 
     if (!text || text.trim() === '') {
         res.status(400).json({ message: 'Could not extract text from this PDF' })
         return
     }
     const cloudinaryResponse = await uploadOnCloudinary(req.file.buffer)
+
+if (!cloudinaryResponse) {
+    res.status(400).json({ message: 'File too large for upload. Maximum size is 10MB.' })
+    return
+}
     const fileUrl = cloudinaryResponse.secure_url
 
     const [fileRecord] = await db.insert(userFiles).values({
@@ -142,7 +146,7 @@ export const getFileConversations = asyncHandler(async (req: Request, res: Respo
     const conversations = await db.select()
         .from(fileConversations)
         .where(
-                eq(fileConversations.userId, userId)
+            eq(fileConversations.userId, userId)
         )
         .orderBy(fileConversations.createdAt)
 
