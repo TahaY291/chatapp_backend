@@ -6,6 +6,7 @@ import { fileChunks, fileConversations, userFiles } from "../db/rag";
 import { uploadOnCloudinary } from "../utils/cloudinary";
 import { and, eq } from "drizzle-orm";
 import { io, onlineUsers } from "../index";
+import { sql } from "drizzle-orm";
 
 
 
@@ -47,17 +48,22 @@ if (!cloudinaryResponse) {
 
     const chunks = await chunkText(text, 500, 50)
 
-    for (const chunk of chunks) {
-        const embedding = await embeddText(chunk.content)
+ for (const chunk of chunks) {
+    const embedding = await embeddText(chunk.content)
 
-        await db.insert(fileChunks).values({
-            fileId: fileRecord.id,
-            userId,
-            content: chunk.content,
-            embedding: embedding,
-            chunkIndex: chunk.index,
-        })
-    }
+    await db.execute(sql`
+        INSERT INTO file_chunks 
+            (file_id, user_id, content, embedding, chunk_index, content_search)
+        VALUES (
+            ${fileRecord.id},
+            ${userId},
+            ${chunk.content},
+            ${JSON.stringify(embedding)}::vector,
+            ${chunk.index},
+            to_tsvector('english', ${chunk.content})
+        )
+    `)
+}
 
     await db.update(userFiles)
         .set({ status: 'ready' })
@@ -89,7 +95,7 @@ export const query = asyncHandler(async (req: Request, res: Response) => {
     }).returning()
 
     const embeddedQuestion = await embeddText(question)
-    const chunks = await searchChunks(embeddedQuestion, 5, userId, fileId)
+    const chunks = await searchChunks(embeddedQuestion, question , 5, userId, fileId )
 
     if (chunks.length === 0) {
         res.status(404).json({ message: 'No relevant content found for this question' })

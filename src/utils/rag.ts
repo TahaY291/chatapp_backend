@@ -4,9 +4,12 @@ import { db } from "../db";
 import { fileChunks } from "../db/rag";
 import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { CohereClient } from "cohere-ai";
+
 
 
 const ollama = new Ollama()
+const cohere = new CohereClient({ token: process.env.COHERE_API_KEY })
 export const chunkText = async (text: string, chunkSize: number, chunkOverlap: number) => {
     const splitter = new RecursiveCharacterTextSplitter({
         chunkSize: chunkSize,
@@ -32,25 +35,73 @@ export const embeddText = async (text: string) => {
     return embeddings.embedding
 }
 
+
 export const searchChunks = async (
-    question: number[],
-    topN: number = 5,
+    questionEmbedding: number[],
+    question: string,
+    topN: number = 10,
     userId: string,
     fileId: string
 ) => {
-    const vectorStr = JSON.stringify(question)
+    const vectorStr = JSON.stringify(questionEmbedding)
 
-    const result = await db.select({
+    const vectorResults = await db.select({
+        id: fileChunks.id,
         content: fileChunks.content,
-    }).from(fileChunks).where(
+        chunkIndex: fileChunks.chunkIndex,
+    })
+    .from(fileChunks)
+    .where(
         and(
             eq(fileChunks.fileId, fileId),
             eq(fileChunks.userId, userId)
         )
-    ).orderBy(sql`embedding <=> ${vectorStr}::vector`)
-        .limit(topN)
+    )
+    .orderBy(sql`embedding <=> ${vectorStr}::vector`)
+    .limit(20)
+    console.log("vector results", vectorResults)
+    const keywordResults = await db.select({
+        id: fileChunks.id,
+        content: fileChunks.content,
+        chunkIndex: fileChunks.chunkIndex,
+    })
+    .from(fileChunks)
+    .where(
+        and(
+            eq(fileChunks.fileId, fileId),
+            eq(fileChunks.userId, userId),
+            sql`content_search @@ plainto_tsquery('english', ${question})`
+        )
+    )
+    .orderBy(sql`ts_rank(content_search, plainto_tsquery('english', ${question})) DESC`)
+    .limit(20)
 
-    return result
+        console.log("keyword results", keywordResults)
+
+    const scores = new Map<string, { content: string; score: number }>()
+    console.log("score", scores)
+    
+    vectorResults.forEach((row, index) => {
+        const rrfScore = 1 / (index + 60)
+        scores.set(row.id, { content: row.content, score: rrfScore })
+    })
+
+    keywordResults.forEach((row, index) => {
+        const rrfScore = 1 / (index + 60)
+        const existing = scores.get(row.id)
+        if (existing) {
+            existing.score += rrfScore
+        } else {
+            scores.set(row.id, { content: row.content, score: rrfScore })
+        }
+    })
+
+    const merged = Array.from(scores.entries())
+        .sort((a, b) => b[1].score - a[1].score)
+        .slice(0, topN)
+        .map(([id, { content }]) => ({ id, content }))
+
+    return merged
 }
 
 export const askLLM = async (question: string, chunks: { content: string }[], onToken: (token: string) => void) => {

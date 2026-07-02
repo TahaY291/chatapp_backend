@@ -3,12 +3,19 @@ import {
     pgTable, pgEnum, index, vector
 } from "drizzle-orm/pg-core";
 import { users } from "./schema";
+import { customType } from "drizzle-orm/pg-core";
 
 export const fileStatusEnum = pgEnum("file_status_enum", [
     'processing',
     'ready',
     'failed'
 ])
+
+const tsvector = customType<{data: string}>({
+    dataType(){
+        return 'tsvector'
+    }
+})
 
 export const userFiles = pgTable('user_files', {
     id: uuid('id').primaryKey().defaultRandom(),
@@ -30,6 +37,7 @@ export const fileChunks = pgTable('file_chunks', {
     content: text('content').notNull(),
     embedding: vector('embedding', { dimensions: 768 }), // match your embedding model
     chunkIndex: integer('chunk_index').notNull(),
+    contentSearch : tsvector('content_search'),
     createdAt: timestamp('created_at').defaultNow(),
 }, (table) => [
     index('idx_file_chunks_file').on(table.fileId),
