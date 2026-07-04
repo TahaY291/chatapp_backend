@@ -4,6 +4,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { users } from "./schema";
 import { customType } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const fileStatusEnum = pgEnum("file_status_enum", [
     'processing',
@@ -20,9 +21,10 @@ const tsvector = customType<{data: string}>({
 export const userFiles = pgTable('user_files', {
     id: uuid('id').primaryKey().defaultRandom(),
     userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-    fileUrl: text('file_url').notNull(),
+    fileUrl: text('file_url'),
     originalName: text('original_name').notNull(),
     fileSize: integer('file_size'),
+    summary: text('summary'),
     status: fileStatusEnum('status').default('processing'),
     uploadedAt: timestamp('uploaded_at').defaultNow(),
 }, (table) => [
@@ -37,7 +39,8 @@ export const fileChunks = pgTable('file_chunks', {
     content: text('content').notNull(),
     embedding: vector('embedding', { dimensions: 768 }), // match your embedding model
     chunkIndex: integer('chunk_index').notNull(),
-    contentSearch : tsvector('content_search'),
+    contentSearch: tsvector('content_search').generatedAlwaysAs(
+    sql`to_tsvector('english', content)`),
     createdAt: timestamp('created_at').defaultNow(),
 }, (table) => [
     index('idx_file_chunks_file').on(table.fileId),

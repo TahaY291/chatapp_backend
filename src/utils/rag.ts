@@ -4,15 +4,19 @@ import { db } from "../db";
 import { fileChunks } from "../db/rag";
 import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
-import { CohereClient } from "cohere-ai";
-
+// import { CohereClient } from "cohere-ai";
+import Groq from 'groq-sdk'
 
 
 const ollama = new Ollama()
-const cohere = new CohereClient({ token: process.env.COHERE_API_KEY })
+// const cohere = new CohereClient({ token: process.env.COHERE_API_KEY })
+console.log('Cohere key:', process.env.COHERE_API_KEY ? 'exists' : 'missing')
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+
+
 export const chunkText = async (text: string, chunkSize: number, chunkOverlap: number) => {
     const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize: chunkSize,
+        chunkSize,
         chunkOverlap,
         separators: ['\n\n', '\n', '.', ' ', '']
     })
@@ -50,17 +54,25 @@ export const searchChunks = async (
         content: fileChunks.content,
         chunkIndex: fileChunks.chunkIndex,
     })
-    .from(fileChunks)
-    .where(
-        and(
-            eq(fileChunks.fileId, fileId),
-            eq(fileChunks.userId, userId)
+        .from(fileChunks)
+        .where(
+            and(
+                eq(fileChunks.fileId, fileId),
+                eq(fileChunks.userId, userId)
+            )
         )
-    )
-    .orderBy(sql`embedding <=> ${vectorStr}::vector`)
-    .limit(20)
-    console.log("vector results", vectorResults)
-    const keywordResults = await db.select({
+        .orderBy(sql`embedding <=> ${vectorStr}::vector`)
+        .limit(20)
+
+const sanitizedQuestion = question
+    .replace(/[?!@#$%^&*()+=\[\]{};':"\\|,.<>\/]/g, ' ')
+    .trim()
+
+
+let keywordResults: typeof vectorResults = []
+
+try {
+    keywordResults = await db.select({
         id: fileChunks.id,
         content: fileChunks.content,
         chunkIndex: fileChunks.chunkIndex,
@@ -70,17 +82,20 @@ export const searchChunks = async (
         and(
             eq(fileChunks.fileId, fileId),
             eq(fileChunks.userId, userId),
-            sql`content_search @@ plainto_tsquery('english', ${question})`
+            sql`content_search @@ websearch_to_tsquery('english', ${sanitizedQuestion})`
         )
     )
-    .orderBy(sql`ts_rank(content_search, plainto_tsquery('english', ${question})) DESC`)
+    .orderBy(sql`ts_rank(content_search, websearch_to_tsquery('english', ${sanitizedQuestion})) DESC`)
     .limit(20)
+} catch (err) {
+    console.log("err is",err)
+    keywordResults = []
+}
 
-        console.log("keyword results", keywordResults)
+    console.log("keyword results", keywordResults)
 
     const scores = new Map<string, { content: string; score: number }>()
-    console.log("score", scores)
-    
+
     vectorResults.forEach((row, index) => {
         const rrfScore = 1 / (index + 60)
         scores.set(row.id, { content: row.content, score: rrfScore })
@@ -109,19 +124,21 @@ export const askLLM = async (question: string, chunks: { content: string }[], on
         .map((c, i) => `Chunk ${i + 1}:\n${c.content}`)
         .join('\n\n')
 
-    const response = await ollama.chat({
-        model: 'llama3.2',
+    const stream = await groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant', // same llama family, hosted on Groq
         messages: [
             {
                 role: 'system',
-                content: `You are a helpful assistant answering questions about an uploaded document.
+                content: `You are a knowledgeable assistant helping users understand a document they have uploaded. You have been given relevant excerpts from that document to answer the user's question.
 
-Rules:
-1. Factual questions (what does the document say, when, who, how much, list X) — answer using ONLY the context below. If the specific fact is not present, say "I don't have enough information in this document to answer that."
-2. Judgement questions (rate, evaluate, what do you think, is this good, summarize your opinion, would you recommend) — these ask for YOUR assessment. Use the context as the basis for your reasoning and give a real opinion. Never refuse these by saying the document "doesn't include a rating" — the document is the evidence, your job is to evaluate it.
-3. Off-topic questions unrelated to the document or its content — answer normally using your own knowledge.
-
-Example: if asked "rate this resume out of 10," look at the skills, experience, and projects in the context, then give an actual number with reasoning. Do not say the document lacks a rating field.
+INSTRUCTIONS:
+- Answer naturally and conversationally, as if you have read and understood the document
+- Never reference "chunks", "context", "excerpts", or any technical retrieval details in your response
+- For factual questions, base your answer strictly on the document content provided
+- For opinion or evaluation questions, use the document content as your evidence and provide a genuine assessment
+- If the document does not contain enough information to answer, say so clearly and briefly
+- Keep answers concise and direct unless detail is specifically needed
+- Do not start your answer with phrases like "According to the document" or "Based on the context" — just answer
 
 CONTEXT:
 ${context}`
@@ -131,15 +148,20 @@ ${context}`
                 content: question
             }
         ],
-        stream: true
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 1024
     })
+
 
     let fullAnswer = ''
 
-    for await (const chunk of response) {
-        const token = chunk.message.content
-        fullAnswer += token
-        onToken(token)
+    for await (const chunk of stream) {
+        const token = chunk.choices[0]?.delta?.content || ''
+        if (token) {
+            fullAnswer += token
+            onToken(token)
+        }
     }
 
     return fullAnswer
@@ -162,4 +184,79 @@ export const extractTextFromPdf = async (buffer: Buffer): Promise<string> => {
     }
 
     return fullText
+}
+
+export const rerankChunks = async (
+    question: string,
+    chunks: { id: string; content: string }[],
+    topN: number
+) => {
+    if (chunks.length === 0) return []
+
+    const response = await fetch('https://api.cohere.com/v2/rerank', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${process.env.COHERE_API_KEY}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: 'rerank-english-v3.0',
+            query: question,
+            documents: chunks.map(c => c.content),
+            top_n: topN
+        })
+    })
+
+    const data = await response.json()
+
+    return data.results.map((result: any) => ({
+        content: chunks[result.index].content,
+        relevanceScore: result.relevance_score
+    }))
+}
+
+export const rewriteQuery = async (question: string, summary: string): Promise<string> => {
+    const response = await groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+            {
+                role: 'system',
+                content: `You are a search query optimizer. The user is asking a question about a document.
+
+Here is a summary of the document:
+"${summary}"
+
+Rewrite the user's question into a clear, specific, detailed search query that will help retrieve the most relevant information from this document.
+Return ONLY the rewritten query. No explanation. No preamble. No quotes.`
+            },
+            {
+                role: 'user',
+                content: question
+            }
+        ],
+        temperature: 0.2,
+        max_tokens: 150
+    })
+
+    return response.choices[0].message.content?.trim() || question
+}
+
+export const generateSummary = async (text: string): Promise<string> => {
+    const response = await groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+            {
+                role: 'system',
+                content: `You are a document summarizer. Write a single concise paragraph describing what this document is about — its topic, type, and key content. This summary will be used to help understand future questions about the document. Return ONLY the summary paragraph, nothing else.`
+            },
+            {
+                role: 'user',
+                content: text.slice(0, 3000)
+            }
+        ],
+        temperature: 0.2,
+        max_tokens: 200 // summary should be short
+    })
+
+    return response.choices[0].message.content || ''
 }
