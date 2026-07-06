@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { asyncHandler } from "../lib/asyncHandler";
-import { askLLM, chunkText, embeddText, extractTextFromPdf, generateSummary, rerankChunks, rewriteQuery, searchChunks } from "../utils/rag";
+import { askLLM, chunkText, embeddText, extractTextFromPdf, generateSummary, getCacheKey, judgeAnswer, queryCache, rerankChunks, rewriteQuery, sanitizeChunk, searchChunks } from "../utils/rag";
 import { db } from "../db";
 import { fileChunks, fileConversations, fileStatusEnum, userFiles } from "../db/rag";
 import { uploadOnCloudinary } from "../utils/cloudinary";
@@ -43,7 +43,9 @@ export const ingestPdfFile = asyncHandler(async (req: Request, res: Response) =>
     const chunks = await chunkText(text, 500, 50)
 
     for (const chunk of chunks) {
-        const embedding = await embeddText(chunk.content)
+        const sanitizedContent = sanitizeChunk(chunk.content)
+        const embedding = await embeddText(sanitizedContent)
+
         await db.insert(fileChunks).values({
             fileId: fileRecord.id,
             userId,
@@ -101,37 +103,61 @@ export const query = asyncHandler(async (req: Request, res: Response) => {
         return
     }
 
-    // save original question immediately
+    // check cache first
+    const cacheKey = getCacheKey(fileId, question)
+    const cachedAnswer = queryCache.get(cacheKey)
+
+    if (cachedAnswer) {
+        console.log('[CACHE HIT]', cacheKey)
+
+        // save to conversation
+        await db.insert(fileConversations).values({
+            userId,
+            fileId,
+            question,
+            answer: cachedAnswer
+        })
+
+        // emit cached answer via socket
+        const socketId = onlineUsers.get(userId)
+        if (socketId) {
+            // stream cached answer token by token so UI behaves the same
+            const words = cachedAnswer.split(' ')
+            for (const word of words) {
+                io.to(socketId).emit('rag:token', { token: word + ' ' })
+                await new Promise(r => setTimeout(r, 20)) // small delay per word
+            }
+            io.to(socketId).emit('rag:done', {})
+        }
+
+        res.status(200).json({ message: 'done' })
+        return
+    }
+
+    // not in cache — run full pipeline
     const [chat] = await db.insert(fileConversations).values({
         userId,
         fileId,
         question
     }).returning()
 
-    // fetch summary for query rewriting
     const [file] = await db.select({ summary: userFiles.summary })
         .from(userFiles)
         .where(eq(userFiles.id, fileId))
 
-    // rewrite only if summary exists — otherwise use original
     const queryForRetrieval = file?.summary
         ? await rewriteQuery(question, file.summary)
         : question
 
-        console.log("Better question",queryForRetrieval)
-        console.log("original question",question)
-
-    // embed rewritten question for better retrieval
     const embeddedQuestion = await embeddText(queryForRetrieval)
-    const chunks = await searchChunks(embeddedQuestion, question, 10, userId, fileId)
+    const chunks = await searchChunks(embeddedQuestion, question, 15, userId, fileId)
 
     if (chunks.length === 0) {
         res.status(404).json({ message: 'No relevant content found for this question' })
         return
     }
 
-    const rerankedChunks = await rerankChunks(queryForRetrieval, chunks, 5)
-
+    const rerankedChunks = await rerankChunks(queryForRetrieval, chunks, 7)
     const socketId = onlineUsers.get(userId)
 
     function getToken(token: string) {
@@ -142,7 +168,8 @@ export const query = asyncHandler(async (req: Request, res: Response) => {
 
     const answer = await askLLM(question, rerankedChunks, getToken)
 
-    // save answer
+    queryCache.set(cacheKey, answer)
+
     await db.update(fileConversations)
         .set({ answer })
         .where(eq(fileConversations.id, chat.id))

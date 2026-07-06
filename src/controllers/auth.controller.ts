@@ -228,6 +228,7 @@ export const verifyEmail = asyncHandler(async (req, res) => {
 
 export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Response) => {
     const { email } = req.body  // ← email from body, no req.user
+    console.log(email)
 
     const checkUserExistArr = await db.select().from(users).where(eq(users.email, email))
     const user = checkUserExistArr[0]
