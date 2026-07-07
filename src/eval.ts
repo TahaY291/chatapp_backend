@@ -24,7 +24,7 @@ const testCases = [
     { question: "Has he worked with React Native or mobile development?", expected: "Not enough information in this document" },
 ]
 
-const FILE_ID = '16e49b92-b05d-4cee-a5fa-22c67df5c2d8'
+const FILE_ID = 'bd25f135-3d65-4bc0-8dd9-e1dea7bb1e2c'
 const USER_ID = 'adbff78b-c1b0-482a-88ab-02424ed1b778'
 
 async function runEval() {
@@ -102,3 +102,5 @@ async function runEval() {
 }
 
 runEval().catch(console.error)
+
+// npx ts-node src/eval.ts

@@ -37,7 +37,7 @@ export const fileChunks = pgTable('file_chunks', {
     fileId: uuid('file_id').notNull().references(() => userFiles.id, { onDelete: 'cascade' }),
     userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     content: text('content').notNull(),
-    embedding: vector('embedding', { dimensions: 768 }), // match your embedding model
+    embedding: vector('embedding', { dimensions: 3072 }), // match your embedding model
     chunkIndex: integer('chunk_index').notNull(),
     contentSearch: tsvector('content_search').generatedAlwaysAs(
     sql`to_tsvector('english', content)`),

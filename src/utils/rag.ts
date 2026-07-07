@@ -35,16 +35,27 @@ export const chunkText = async (text: string, chunkSize: number, chunkOverlap: n
         charCount: chunk.pageContent.length
     }))
 }
-
 export const embeddText = async (text: string) => {
-    const embeddings = await ollama.embeddings({
-        model: 'nomic-embed-text',
-        prompt: text
-    })
+    const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                content: { parts: [{ text }] },
+            })
+        }
+    )
 
-    return embeddings.embedding
+    if (!res.ok) {
+        const errorBody = await res.text()
+        throw new Error(`Gemini embedding failed: ${res.status} ${errorBody}`)
+    }
+
+    const data = await res.json()
+    console.log('Actual embedding length:', data.embedding.values.length)
+    return data.embedding.values as number[]
 }
-
 
 export const searchChunks = async (
     questionEmbedding: number[],
@@ -215,6 +226,11 @@ export const rerankChunks = async (
         })
     })
 
+    if (!response.ok) {
+        const errorBody = await response.text()
+        throw new Error(`Cohere rerank failed: ${response.status} ${errorBody}`)
+    }
+
     const data = await response.json()
 
     return data.results.map((result: any) => ({
@@ -222,7 +238,6 @@ export const rerankChunks = async (
         relevanceScore: result.relevance_score
     }))
 }
-
 export const rewriteQuery = async (question: string, summary: string): Promise<string> => {
     const response = await groq.chat.completions.create({
         model: 'llama-3.1-8b-instant',
