@@ -2,8 +2,13 @@ import bcrypt from 'bcryptjs'
 import  jwt , {Secret , SignOptions} from 'jsonwebtoken'
 import { db } from '../db'
 import { users , refreshTokens } from '../db/schema'
+import crypto from 'crypto'
 import { eq } from 'drizzle-orm'
 import { ApiError } from './ApiError'
+
+
+export const hashToken = (token: string): string =>
+    crypto.createHash('sha256').update(token).digest('hex')
 
 export const bcryptPassword = async (password: string) : Promise<string> =>{
     return await bcrypt.hash(password , 10)
@@ -36,49 +41,38 @@ export const generateRefreshToken = (userId: string): string => {
 }
 
 
-export const saveRefreshToken = async (
-    userId: string,
-    token: string
-): Promise<void> => {
-    const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + 7)
-
-    await db.insert(refreshTokens).values({
-        userId,
-        token,
-        expiresAt
-    })
-}
-
-export const deleteRefreshToken =  async (token: string) : Promise<void> => {
-    await db.delete(refreshTokens).where(eq(refreshTokens.token, token))
-}
-
 export const deleteAllRefreshToken = async (userId: string): Promise<void> => {
     await db.delete(refreshTokens).where(eq(refreshTokens.userId, userId))
 }
 
 
 export const verifyRefreshToken = async (token: string) => {
-    
     let decoded: { id: string }
-  try {
-    decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as { id: string }
-  } catch (err) {
-    if (err instanceof jwt.TokenExpiredError) {
-      throw new ApiError(401, "Refresh token expired")  // ✅ 401 not 500
+    try {
+        decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as { id: string }
+    } catch (err) {
+        if (err instanceof jwt.TokenExpiredError) {
+            throw new ApiError(401, "Refresh token expired")
+        }
+        throw new ApiError(401, "Invalid refresh token")
     }
-    throw new ApiError(401, "Invalid refresh token")
-  }
+
     const storedToken = await db.query.refreshTokens.findFirst({
-        where: eq(refreshTokens.token, token),
+        where: eq(refreshTokens.token, hashToken(token)),   // ← hash before lookup
     });
 
-    if (!storedToken) throw new Error("Refresh token not found");
+    if (!storedToken) throw new ApiError(401, "Refresh token not found")   // also fixing the plain-Error bug from earlier
     if (storedToken.expiresAt < new Date()) {
-        await deleteRefreshToken(token); 
-        throw new Error("Refresh token expired");
+        await deleteRefreshToken(token)
+        throw new ApiError(401, "Refresh token expired")
     }
 
     return decoded;
 };
+
+export const deleteRefreshToken = async (token: string): Promise<void> => {
+    await db.delete(refreshTokens).where(eq(refreshTokens.token, hashToken(token)))   // ← hash before delete
+}
+
+export const verifyOtpKey = (email: string) => `otp:verify:${email}`
+export const resetOtpKey = (email: string) => `otp:reset:${email}`

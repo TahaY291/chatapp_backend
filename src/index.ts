@@ -11,9 +11,15 @@ import callRouter from './routes/call.routes'
 import ragRouter from './routes/rag.routes'
 import { Server } from "socket.io";
 import http from 'http'
-
+import { redisClient } from './lib/redis'
 dotenv.config();
 
+redisClient
+  .ping()
+  .then((res: string) => console.log("Redis ping response:", res))
+  .catch((err: Error) => console.error("Redis ping error:", err));
+
+  
 const app = express();
 const PORT = process.env.PORT || 5000;
 

@@ -5,10 +5,12 @@ import { asyncHandler } from "../lib/asyncHandler";
 import { ForgotPasswordInput, LoginInput, RegisterInput, ResetPasswordInput, UpdateProfileInput } from "../validator/auth.validator";
 import { eq } from "drizzle-orm";
 import { ApiError } from "../lib/ApiError";
-import { bcryptPassword, generateAccessToken, generateRefreshToken, verifyPassword, verifyRefreshToken } from "../lib/auth";
+import { bcryptPassword, generateAccessToken, generateRefreshToken, hashToken, resetOtpKey, verifyOtpKey, verifyPassword, verifyRefreshToken } from "../lib/auth";
 import { ApiResponse } from "../lib/ApiResponse";
 import transporter from "../utils/nodemailer";
 import { deleteFromCloudinary, uploadOnCloudinary } from "../utils/cloudinary";
+import { redisClient } from "../lib/redis";
+
 
 const generateAccessAndRefreshToken = async (userId: string) => {
     try {
@@ -23,7 +25,7 @@ const generateAccessAndRefreshToken = async (userId: string) => {
 
         await db.insert(refreshTokens).values({
             userId: userId,
-            token: refreshToken,
+            token: hashToken(refreshToken),
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
         })
         return { accessToken, refreshToken }
@@ -60,10 +62,7 @@ export const registerUser = asyncHandler(
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
-
-        await db.update(users)
-            .set({ verifyOTP: otp, verifyOTPExpiry: otpExpiry })
-            .where(eq(users.id, createdUser.id));
+        await redisClient.set(verifyOtpKey(createdUser.email), otp, 'EX', 10 * 60); 
 
         const mailOptions = {
             from: process.env.SENDER_EMAIL,
@@ -76,8 +75,7 @@ export const registerUser = asyncHandler(
             console.error("Verification email failed:", emailError.message);
         });
 
-        const { passwordHash, verifyOTP, verifyOTPExpiry,
-            resetOTP, resetOTPExpiry, ...safeUser } = createdUser;
+        const { passwordHash, ...safeUser } = createdUser;
 
         return res.status(201).json(
             new ApiResponse(201, safeUser, "User registered successfully. Please check your email for OTP.")
@@ -104,29 +102,27 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
 
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(existingUser[0].id)
 
-    const { passwordHash, verifyOTP, verifyOTPExpiry,
-        resetOTP, resetOTPExpiry, ...loggedInUser } = existingUser[0]
+    const { passwordHash,  ...loggedInUser } = existingUser[0]
 
-    const options: CookieOptions = {
-        httpOnly: true,
-        secure: true,
-        sameSite: "none"
-    }
+const accessTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+}
+
+const refreshTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+}
 
     const res1 = res.status(200)
-        .cookie("accessToken", accessToken, options)
-        .cookie("refreshToken", refreshToken, options)
-        .cookie("isVerified", String(loggedInUser.isVerified), options)
-    if (!loggedInUser.isVerified) {
-        res1.cookie("email", loggedInUser.email, {
-            httpOnly: true,
-            secure: true,
-            sameSite: "none",
-            maxAge: 10 * 60 * 1000
-        })
-    }
+        .cookie("accessToken", accessToken, accessTokenOptions)
+        .cookie("refreshToken", refreshToken, refreshTokenOptions)
 
-    return res1.json(new ApiResponse(200, { loggedInUser, accessToken, refreshToken }, "User logged in successfully"))
+    return res1.json(new ApiResponse(200, { loggedInUser }, "User logged in successfully"))
 })
 export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
     const incomingToken = req.cookies?.refreshToken || req.body?.refreshToken || req.header('Authorization')?.replace("Bearer ", "")
@@ -135,17 +131,24 @@ export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
     if (!incomingToken) {
         throw new ApiError(401, "Unauthorized _ refresh token is missing")
     }
-    await db.delete(refreshTokens).where(eq(refreshTokens.token, incomingToken))
+    await db.delete(refreshTokens).where(eq(refreshTokens.token, hashToken(incomingToken)))
 
-    const options: CookieOptions = {
-        httpOnly: true,
-        secure: true,
-        sameSite: "none"
-    }
+const accessTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+}
 
+const refreshTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+}
     return res.status(200)
-        .clearCookie("accessToken", options)
-        .clearCookie("refreshToken", options)
+        .clearCookie("accessToken", accessTokenOptions)
+        .clearCookie("refreshToken", refreshTokenOptions)
         .json(new ApiResponse(200, null, "User logged out successfully"))
 })
 
@@ -160,7 +163,7 @@ export const refreshAccessToken = asyncHandler(async (req: Request, res: Respons
     const userId = decoded.id
 
     const dbTokenArr = await db.select().from(refreshTokens)
-        .where(eq(refreshTokens.token, incomingRefreshToken))
+        .where(eq(refreshTokens.token, hashToken(incomingRefreshToken)))
 
     if (!dbTokenArr[0]) {
         throw new ApiError(401, "Refresh token not found")
@@ -170,20 +173,28 @@ export const refreshAccessToken = asyncHandler(async (req: Request, res: Respons
         throw new ApiError(401, "Refresh token mismatch")
     }
 
-    await db.delete(refreshTokens).where(eq(refreshTokens.token, incomingRefreshToken))
+    await db.delete(refreshTokens).where(eq(refreshTokens.token, hashToken(incomingRefreshToken)))
 
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(userId)
 
-    const options: CookieOptions = {
-        httpOnly: true,
-        secure: true,
-        sameSite: "none"
-    }
+    const accessTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+}
+
+const refreshTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+}
 
     return res.status(200)
-        .cookie("accessToken", accessToken, options)
-        .cookie("refreshToken", refreshToken, options)
-        .json(new ApiResponse(200, { accessToken, refreshToken }, "Tokens refreshed successfully"))
+        .cookie("accessToken", accessToken, accessTokenOptions)
+        .cookie("refreshToken", refreshToken, refreshTokenOptions)
+        .json(new ApiResponse(200, null, "Tokens refreshed successfully"))
 })
 
 export const verifyEmail = asyncHandler(async (req, res) => {
@@ -194,35 +205,41 @@ export const verifyEmail = asyncHandler(async (req, res) => {
 
     if (!user) throw new ApiError(404, "User not found")
     if (user.isVerified) throw new ApiError(400, "User already verified")
-    if (!user.verifyOTP || !user.verifyOTPExpiry || user.verifyOTPExpiry < new Date()) {
-        throw new ApiError(400, "OTP expired or not found — please request a new one")
+        
+    const storedOtp = await redisClient.get(verifyOtpKey(email))
+    if (!storedOtp || storedOtp !== otp) {
+        throw new ApiError(400, "Invalid OTP")
     }
-    if (user.verifyOTP !== String(otp)) throw new ApiError(400, "Invalid OTP")
 
     await db.update(users).set({
         isVerified: true,
-        verifyOTP: null,
-        verifyOTPExpiry: null
     }).where(eq(users.email, email))  // ← use email not userId
+
+    await redisClient.del(verifyOtpKey(email))  // ← delete OTP from Redis after successful verification
 
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(user.id)
 
-    const { passwordHash, verifyOTP, verifyOTPExpiry,
-        resetOTP, resetOTPExpiry, ...loggedInUser } = user
+    const { passwordHash,  ...loggedInUser } = user
 
     const finalUser = { ...loggedInUser, isVerified: true }
 
-    const options: CookieOptions = {
-        httpOnly: true,
-        secure: true,
-        sameSite: "none"
-    }
+    const accessTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+}
+
+const refreshTokenOptions: CookieOptions = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+}
 
     return res.status(200)
-        .cookie("accessToken", accessToken, options)
-        .cookie("refreshToken", refreshToken, options)
-        .cookie("isVerified", "true", options)
-        .clearCookie("email", options)
+        .cookie("accessToken", accessToken, accessTokenOptions)
+        .cookie("refreshToken", refreshToken, refreshTokenOptions)
         .json(new ApiResponse(200, { user: finalUser }, "Email verified successfully"))
 })
 
@@ -237,11 +254,8 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
     if (user.isVerified) throw new ApiError(400, "User is already verified")
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000)
 
-    await db.update(users)
-        .set({ verifyOTP: otp, verifyOTPExpiry: otpExpiry })
-        .where(eq(users.email, email))  // ← use email not userId
+    await redisClient.set(verifyOtpKey(email), otp, 'EX', 10 * 60)  // ← store OTP in Redis with expiry
 
     const mailOptions = {
         from: process.env.SENDER_EMAIL,
@@ -327,8 +341,7 @@ export const updateUsernameAndBio = asyncHandler(async (req: Request, res: Respo
         .where(eq(users.id, userId))
         .returning()
 
-    const { passwordHash, verifyOTP, verifyOTPExpiry,
-        resetOTP, resetOTPExpiry, ...safeUser } = updatedUserArr[0]
+    const { passwordHash, ...safeUser } = updatedUserArr[0]
 
     res.status(200).json(new ApiResponse(200, safeUser, "Profile updated successfully"))
 })
@@ -344,12 +357,7 @@ export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Respo
     }
 
     const otp = String(Math.floor(100000 + Math.random() * 900000))
-
-    await db.update(users).set({
-        resetOTP: otp,
-        resetOTPExpiry: new Date(Date.now() + 10 * 60 * 1000),
-    }).where(eq(users.email, email))
-
+    await redisClient.set(resetOtpKey(email), otp, 'EX', 10 * 60)  
 
     const mailOptions = {
         from: process.env.SENDER_EMAIL,
@@ -360,10 +368,6 @@ export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Respo
     try {
         await transporter.sendMail(mailOptions)
     } catch (error) {
-        await db.update(users).set({
-            resetOTP: null,
-            resetOTPExpiry: null,
-        }).where(eq(users.email, email))
         throw new ApiError(500, "Failed to send OTP email")
     }
     res.status(200).json(new ApiResponse(200, null, "OTP sent to email successfully"))
@@ -377,20 +381,17 @@ export const verifyResetPassword = asyncHandler(async (req, res) => {
     if (!user) {
         throw new ApiError(404, "User not found")
     }
+    const resetOtp = await redisClient.get(resetOtpKey(email))
 
-    if (!user.resetOTP || !user.resetOTPExpiry || user.resetOTPExpiry < new Date()) {
-        throw new ApiError(400, "OTP has expired")
-    }
-
-    if (user.resetOTP !== String(otp)) {
+    if (resetOtp !== String(otp)) {
         throw new ApiError(400, "Invalid OTP")
     }
+
+    await redisClient.del(resetOtpKey(email))  // Delete OTP from Redis after successful verification
 
     const password = await bcryptPassword(newPassword)
 
     await db.update(users).set({
-        resetOTP: null,
-        resetOTPExpiry: null,
         passwordHash: password
     }).where(eq(users.email, email))
 
@@ -428,8 +429,7 @@ export const getMe = asyncHandler(async (req, res) => {
         throw new ApiError(404, "user not found")
     }
 
-    const { passwordHash, verifyOTP, verifyOTPExpiry,
-        resetOTP, resetOTPExpiry, ...loggedInUser } = userExist[0]
+    const { passwordHash, ...loggedInUser } = userExist[0]
 
     return res.status(200).json(new ApiResponse(200, loggedInUser, "User fetched successfuly"))
 })
