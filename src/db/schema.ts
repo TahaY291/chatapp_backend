@@ -19,16 +19,11 @@ export const users = pgTable('users', {
     passwordHash: text('password_hash').notNull(),
     avatarUrl: text('avatar_url'),
     about: text('about').default('Hey, I am chatting'),
-    isOnline: boolean("is_online").default(false),
-    lastSeen: timestamp("last_seen"),
-
     isVerified: boolean("is_verified").default(false),
-    // verifyOTP and verifyOTPExpiry removed — now lives in Redis
-
     createdAt: timestamp("created_at").defaultNow(),
+    
 }, (table) => [
     index("idx_users_username").on(table.username),
-    index("idx_users_is_online").on(table.isOnline),
     index("idx_users_email").on(table.email),
 ])
 

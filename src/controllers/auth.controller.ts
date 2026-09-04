@@ -405,13 +405,13 @@ export const searchUserByEmail = asyncHandler(async (req: Request, res: Response
         throw new ApiError(400, "Email is required")
     }
 
+
     const usersEmailArr = await db.select({
         id: users.id,
         username: users.username,
         email: users.email,
         avatarUrl: users.avatarUrl,
         about: users.about,
-        isOnline: users.isOnline,
     }).from(users).where(eq(users.email, email))
 
     if (!usersEmailArr[0]) {

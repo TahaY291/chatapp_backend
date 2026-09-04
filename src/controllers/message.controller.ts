@@ -9,6 +9,7 @@ import { uploadOnCloudinary } from "../utils/cloudinary";
 import { io, onlineUsers } from "../index";
 import { alias } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm";
+import { redisClient } from "../lib/redis";
 
 export const insertMessage = asyncHandler(async (req: Request, res: Response) => {
     const { conversationId, content, replyToId } = req.body
@@ -46,10 +47,10 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
     let messageType: "text" | "image" | "video" | "audio" | "file" = "text"
 
     if (req.file) {
-        if (req.file.mimetype.startsWith("image/"))      messageType = "image"
+        if (req.file.mimetype.startsWith("image/")) messageType = "image"
         else if (req.file.mimetype.startsWith("video/")) messageType = "video"
         else if (req.file.mimetype.startsWith("audio/")) messageType = "audio"
-        else                                              messageType = "file"
+        else messageType = "file"
     }
 
     const [newMessage] = await db
@@ -57,23 +58,23 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
         .values({
             conversationId,
             senderId,
-            content:    content    || null,
-            mediaUrl:   req.file   ? "uploading" : null,
-            type:       messageType,
-            replyToId:  replyToId  || null,
+            content: content || null,
+            mediaUrl: req.file ? "uploading" : null,
+            type: messageType,
+            replyToId: replyToId || null,
         })
         .returning()
 
     const receiverSocketId = onlineUsers.get(receiver.userId)
     if (receiverSocketId) {
         io.to(receiverSocketId).emit("receive-message", newMessage)
-    }    res.status(201).json(new ApiResponse(201, newMessage, "Message sent successfully"))
+    } res.status(201).json(new ApiResponse(201, newMessage, "Message sent successfully"))
 
     Promise.all([
         db.insert(messageStatus).values({
             messageId: newMessage.id,
-            userId:    receiver.userId,
-            status:    "sent",
+            userId: receiver.userId,
+            status: "sent",
         }),
         db.update(conversation)
             .set({ updatedAt: new Date() })
@@ -136,6 +137,7 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
         ne(conversationParticipants.userId, senderId)
     ))
     const otherParticipantId = otherParticipantArr[0].userId
+    const otherParticipantPresence = await redisClient.hgetall(`presence:${otherParticipantId}`)
 
     const isBlockedArr = await db.select().from(blockedUsers).where(
         or(
@@ -199,11 +201,14 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
         new ApiResponse(200, {
             messages: conversationMessages,
             isBlocked: isBlocked ? true : false,
+            otherParticipant: {
+                isOnline: otherParticipantPresence.status === "online",
+                lastSeen: otherParticipantPresence.lastSeen
+                    ? new Date(Number(otherParticipantPresence.lastSeen))
+                    : null
+            },
             pagination: {
-                page,
-                limit,
-                total,
-                totalPages,
+                page, limit, total, totalPages,
                 hasNextPage: page < totalPages,
                 hasPrevPage: page > 1
             }
@@ -212,40 +217,39 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
 
 })
 
-
 export const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const currentUserId = req.user!.id
 
     const myParticipation = alias(conversationParticipants, "my_participation")
     const otherParticipation = alias(conversationParticipants, "other_participation")
 
-   // step 1 — max createdAt per conversation
-const latestPerConversation = db
-    .select({
-        conversationId: messages.conversationId,
-        maxCreatedAt: sql<Date>`MAX(${messages.createdAt})`.as("max_created_at")
-    })
-    .from(messages)
-    .groupBy(messages.conversationId)
-    .as("latest_per_conversation")
+    // step 1 — max createdAt per conversation
+    const latestPerConversation = db
+        .select({
+            conversationId: messages.conversationId,
+            maxCreatedAt: sql<Date>`MAX(${messages.createdAt})`.as("max_created_at")
+        })
+        .from(messages)
+        .groupBy(messages.conversationId)
+        .as("latest_per_conversation")
 
-// step 2 — join back to get the full message row
-const lastMessageSubquery = db
-    .select({
-        conversationId: messages.conversationId,
-        content: messages.content,
-        type: messages.type,
-        createdAt: messages.createdAt,
-    })
-    .from(messages)
-    .innerJoin(
-        latestPerConversation,
-        and(
-            eq(messages.conversationId, latestPerConversation.conversationId),
-            eq(messages.createdAt, latestPerConversation.maxCreatedAt)
+    // step 2 — join back to get the full message row
+    const lastMessageSubquery = db
+        .select({
+            conversationId: messages.conversationId,
+            content: messages.content,
+            type: messages.type,
+            createdAt: messages.createdAt,
+        })
+        .from(messages)
+        .innerJoin(
+            latestPerConversation,
+            and(
+                eq(messages.conversationId, latestPerConversation.conversationId),
+                eq(messages.createdAt, latestPerConversation.maxCreatedAt)
+            )
         )
-    )
-    .as("last_message")
+        .as("last_message")
 
     const unreadCountSubquery = db
         .select({
@@ -279,7 +283,6 @@ const lastMessageSubquery = db
             otherUserId: users.id,
             otherUsername: users.username,
             otherAvatarUrl: users.avatarUrl,
-            otherIsOnline: users.isOnline,
 
             // ✅ how current user saved the other person
             nickname: contacts.nickname,
