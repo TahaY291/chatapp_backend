@@ -16,22 +16,30 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
     const senderId = req.user!.id
 
     if (!conversationId) throw new ApiError(400, "Conversation ID is required")
-    // if (!content || !req.file) throw new ApiError(400, "Message content or file is required")
 
-    const [participantsArr, repliedMessageArr] = await Promise.all([
-        db.select({ userId: conversationParticipants.userId })
-            .from(conversationParticipants)
-            .where(eq(conversationParticipants.conversationId, conversationId)),
+    const participantsCacheKey = `conversation:participants:${conversationId}`
 
+    const [cachedParticipants, repliedMessageArr] = await Promise.all([
+        redisClient.get(participantsCacheKey),
         replyToId
             ? db.select({ id: messages.id })
                 .from(messages)
-                .where(and(
-                    eq(messages.id, replyToId),
-                    eq(messages.conversationId, conversationId)
-                ))
+                .where(and(eq(messages.id, replyToId), eq(messages.conversationId, conversationId)))
             : Promise.resolve([])
     ])
+
+    let participantsArr: { userId: string }[]
+
+    if (cachedParticipants) {
+        participantsArr = JSON.parse(cachedParticipants)
+    } else {
+        participantsArr = await db.select({ userId: conversationParticipants.userId })
+            .from(conversationParticipants)
+            .where(eq(conversationParticipants.conversationId, conversationId))
+
+        await redisClient.set(participantsCacheKey, JSON.stringify(participantsArr), 'EX', 60 * 60 * 24)
+    }
+
     if (participantsArr.length === 0) throw new ApiError(404, "Conversation not found")
 
     const isMember = participantsArr.some(p => p.userId === senderId)
@@ -45,7 +53,6 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
     }
 
     let messageType: "text" | "image" | "video" | "audio" | "file" = "text"
-
     if (req.file) {
         if (req.file.mimetype.startsWith("image/")) messageType = "image"
         else if (req.file.mimetype.startsWith("video/")) messageType = "video"
@@ -68,7 +75,11 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
     const receiverSocketId = onlineUsers.get(receiver.userId)
     if (receiverSocketId) {
         io.to(receiverSocketId).emit("receive-message", newMessage)
-    } res.status(201).json(new ApiResponse(201, newMessage, "Message sent successfully"))
+    }
+    res.status(201).json(new ApiResponse(201, newMessage, "Message sent successfully"))
+
+    await redisClient.del(`conversations:${senderId}`);
+    await redisClient.del(`conversations:${receiver.userId}`);
 
     Promise.all([
         db.insert(messageStatus).values({
@@ -83,14 +94,12 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
 
     if (req.file) {
         const fileBuffer = req.file.buffer
-
         uploadOnCloudinary(fileBuffer, "messages")
             .then(async (result) => {
                 if (!result) {
                     console.error("Cloudinary upload returned null")
                     return
                 }
-
                 const [updatedMessage] = await db
                     .update(messages)
                     .set({ mediaUrl: result.secure_url })
@@ -98,13 +107,8 @@ export const insertMessage = asyncHandler(async (req: Request, res: Response) =>
                     .returning()
 
                 const senderSocketId = onlineUsers.get(senderId)
-
-                if (receiverSocketId) {
-                    io.to(receiverSocketId).emit("message-updated", updatedMessage)
-                }
-                if (senderSocketId) {
-                    io.to(senderSocketId).emit("message-updated", updatedMessage)
-                }
+                if (receiverSocketId) io.to(receiverSocketId).emit("message-updated", updatedMessage)
+                if (senderSocketId) io.to(senderSocketId).emit("message-updated", updatedMessage)
             })
             .catch(err => console.error("Cloudinary upload failed:", err))
     }
@@ -218,7 +222,17 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
 })
 
 export const getConversations = asyncHandler(async (req: Request, res: Response) => {
+
     const currentUserId = req.user!.id
+    const cacheKey = `conversations:${currentUserId}`
+
+    const cached = await redisClient.get(cacheKey)
+    console.log(`Cache check for ${cacheKey}:`, cached ? "HIT" : "MISS")
+    if (cached) {
+        return res.status(200).json(
+            new ApiResponse(200, JSON.parse(cached), "Conversations fetched cached")
+        )
+    }
 
     const myParticipation = alias(conversationParticipants, "my_participation")
     const otherParticipation = alias(conversationParticipants, "other_participation")
@@ -315,10 +329,17 @@ export const getConversations = asyncHandler(async (req: Request, res: Response)
         .orderBy(desc(conversation.updatedAt))
 
 
+    await redisClient.set(cacheKey, JSON.stringify(conversations), "EX", 60)
+
+
+
+
+
     return res.status(200).json(
         new ApiResponse(200, conversations, "Conversations fetched successfully")
     )
 })
+
 export const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
     const currentUserId = req.user!.id
     const messageId = req.params.messageId as string

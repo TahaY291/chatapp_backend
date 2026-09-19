@@ -5,6 +5,8 @@ import { conversation, conversationParticipants, users } from "../db/schema";
 import { and, eq } from "drizzle-orm";
 import { ApiResponse } from "../lib/ApiResponse";
 import { ApiError } from "../lib/ApiError";
+import { redisClient } from "../lib/redis";
+import { alias } from "drizzle-orm/pg-core";
 
 export const createConversation = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.id
@@ -18,36 +20,32 @@ export const createConversation = asyncHandler(async (req: Request, res: Respons
         throw new ApiError(400, "You cannot start a conversation with yourself")
     }
 
-    const rows = await db
+
+    const myParticipation = alias(conversationParticipants, "my_participation")
+    const otherParticipation = alias(conversationParticipants, "other_participation")
+
+    const existingConversationArr = await db
         .select({ id: conversation.id })
         .from(conversation)
         .innerJoin(
-            conversationParticipants,
-            eq(conversationParticipants.conversationId, conversation.id)
+            myParticipation,
+            and(
+                eq(myParticipation.conversationId, conversation.id),
+                eq(myParticipation.userId, userId)
+            )
+        )
+        .innerJoin(otherParticipation,
+            and(
+                eq(otherParticipation.conversationId, conversation.id),
+                eq(otherParticipation.userId, participantId)
+            )
         )
         .where(
-            and(
-                eq(conversation.type, "direct"),
-                eq(conversationParticipants.userId, userId)
-            )
+            eq(conversation.type, "direct")
         )
+        .limit(1)
 
-    let existingConversation = null
-    for (const row of rows) {
-        const other = await db
-            .select()
-            .from(conversationParticipants)
-            .where(
-                and(
-                    eq(conversationParticipants.conversationId, row.id),
-                    eq(conversationParticipants.userId, participantId)
-                )
-            )
-        if (other.length > 0) {
-            existingConversation = row
-            break
-        }
-    }
+        const existingConversation = existingConversationArr[0]
 
     const otherUserArr = await db.select().from(users).where(
         eq(users.id, participantId)
@@ -84,6 +82,9 @@ export const createConversation = asyncHandler(async (req: Request, res: Respons
         { conversationId: newConversation.id, userId: userId },
         { conversationId: newConversation.id, userId: participantId },
     ])
+
+    await redisClient.del(`conversations:${userId}`);
+    await redisClient.del(`conversations:${participantId}`);
 
     return res.status(201).json(
         new ApiResponse(201, {

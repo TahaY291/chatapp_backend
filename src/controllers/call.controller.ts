@@ -9,6 +9,7 @@ import { io } from "../index";
 import { ApiResponse } from "../lib/ApiResponse";
 import { alias } from "drizzle-orm/pg-core";
 import { count } from "drizzle-orm";
+import { redisClient } from "../lib/redis";
 
 export const callInitiate = asyncHandler(async (req: Request, res: Response) => {
     const callerId = req.user!.id
@@ -296,44 +297,54 @@ if (call.receiverId) {
         new ApiResponse(200, null, "Call ended successfully")
     )
 })
-export const getUserCallHistory = asyncHandler(async(req: Request, res: Response)=>{
+export const getUserCallHistory = asyncHandler(async (req: Request, res: Response) => {
+    const start = Date.now()
     const userId = req.user!.id
 
     const page = parseInt(req.query.page as string) || 1
     const limit = parseInt(req.query.limit as string) || 20
     const offset = (page - 1) * limit
 
-    const caller = alias(users , "caller")
-    const receiver = alias(users , "receiver")
+    // ✅ key now encodes every input that affects the response
+    const cacheKey = `calls:${userId}:page:${page}:limit:${limit}`
+
+    const cached = await redisClient.get(cacheKey)
+    if (cached) {
+        return res.status(200).json(   // ✅ return added
+            new ApiResponse(200, JSON.parse(cached), "calls fetched Cache")
+        )
+    }
+
+    const caller = alias(users, "caller")
+    const receiver = alias(users, "receiver")
 
     const callHistory = await db.select({
-         callId:           calls.id,
-        type:             calls.type,
-        status:           calls.status,
-        startedAt:        calls.startedAt,
-        endedAt:          calls.endedAt,
-        duration:         calls.duration,
-        createdAt:  calls.createdAt,
-        conversationId:   calls.conversationId,
+        callId: calls.id,
+        type: calls.type,
+        status: calls.status,
+        startedAt: calls.startedAt,
+        endedAt: calls.endedAt,
+        duration: calls.duration,
+        createdAt: calls.createdAt,
+        conversationId: calls.conversationId,
 
-        callerId:         calls.callerId,
-        callerUsername:   caller.username,
-        callerAvatar:     caller.avatarUrl,
+        callerId: calls.callerId,
+        callerUsername: caller.username,
+        callerAvatar: caller.avatarUrl,
 
-        receiverId:       calls.receiverId,
+        receiverId: calls.receiverId,
         receiverUsername: receiver.username,
-        receiverAvatar:   receiver.avatarUrl,
+        receiverAvatar: receiver.avatarUrl,
     }).from(calls)
-    .innerJoin(caller , eq(calls.callerId , caller.id))
-    .leftJoin(receiver, eq(calls.receiverId , receiver.id))
-    .where(or(
-        eq(calls.callerId , userId),
-        eq(calls.receiverId , userId)
-    ))
-    .orderBy(desc(calls.createdAt))
-    .limit(limit)
-    .offset(offset)
-
+        .innerJoin(caller, eq(calls.callerId, caller.id))
+        .leftJoin(receiver, eq(calls.receiverId, receiver.id))
+        .where(or(
+            eq(calls.callerId, userId),
+            eq(calls.receiverId, userId)
+        ))
+        .orderBy(desc(calls.createdAt))
+        .limit(limit)
+        .offset(offset)
 
     const totalCalls = await db
         .select({ count: count() })
@@ -345,20 +356,26 @@ export const getUserCallHistory = asyncHandler(async(req: Request, res: Response
             )
         )
 
-         const total = totalCalls[0].count
+    const total = totalCalls[0].count
     const totalPages = Math.ceil(Number(total) / limit)
 
+    const callWIthPgnt = {
+        calls: callHistory,
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages,
+            hasNextPage: page < totalPages,
+            hasPrevPage: page > 1
+        }
+    }
+
+    // ✅ stringify before storing
+    await redisClient.set(cacheKey, JSON.stringify(callWIthPgnt), "EX", 60)
+        console.log(`getcalls DB query took: ${Date.now() - start}ms`)
+
     return res.status(200).json(
-        new ApiResponse(200, {
-            calls: callHistory,
-            pagination: {
-                page,
-                limit,
-                total,
-                totalPages,
-                hasNextPage: page < totalPages,
-                hasPrevPage: page > 1
-            }
-        }, "Call history fetched successfully")
+        new ApiResponse(200, callWIthPgnt, "Call history fetched successfully")
     )
 })

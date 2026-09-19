@@ -12,6 +12,7 @@ import ragRouter from "./routes/rag.routes";
 import { Server } from "socket.io";
 import http from "http";
 import { redisClient } from "./lib/redis";
+import { errorHandler } from "./middlewares/errorHandler";
 dotenv.config();
 
 redisClient
@@ -26,6 +27,8 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [
     "https://chatapp-frontend-theta-eight.vercel.app",
     "http://localhost:3000",
 ];
+
+app.set("trust proxy", 1);
 
 app.use(
     cors({
@@ -45,6 +48,9 @@ app.use("/contact", contactRouter);
 app.use("/conversation", conversationRouter);
 app.use("/call", callRouter);
 app.use("/rag", ragRouter);
+
+app.use(errorHandler) 
+
 app.get("/health", (req, res) => {
     res.json({ status: "server is running" });
 });

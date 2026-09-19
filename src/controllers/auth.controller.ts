@@ -10,6 +10,7 @@ import { ApiResponse } from "../lib/ApiResponse";
 import transporter from "../utils/nodemailer";
 import { deleteFromCloudinary, uploadOnCloudinary } from "../utils/cloudinary";
 import { redisClient } from "../lib/redis";
+import jwt from 'jsonwebtoken'
 
 
 const generateAccessAndRefreshToken = async (userId: string) => {
@@ -48,6 +49,17 @@ export const registerUser = asyncHandler(
             throw new ApiError(400, "User with this email already exists");
         }
 
+        const ip = req.ip
+        const rateLimitKey = `register:attempts:${ip}`
+
+        const [[, count ]] = await redisClient.multi().incr(rateLimitKey).expire(rateLimitKey, 60 * 60).exec() as any
+
+        if (count > 4) {
+            throw new ApiError(429 , "Too many registration attempts")
+        }
+
+
+
         const hashedPassword = await bcryptPassword(password);
 
         const newUser = await db
@@ -62,7 +74,7 @@ export const registerUser = asyncHandler(
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
-        await redisClient.set(verifyOtpKey(createdUser.email), otp, 'EX', 10 * 60); 
+        await redisClient.set(verifyOtpKey(createdUser.email), otp, 'EX', 10 * 60);
 
         const mailOptions = {
             from: process.env.SENDER_EMAIL,
@@ -86,6 +98,7 @@ export const registerUser = asyncHandler(
 export const loginUser = asyncHandler(async (req: Request, res: Response) => {
     const { email, password } = req.body as LoginInput
 
+
     const existingUser = await db.select().from(users).where(eq(users.email, email))
     if (!existingUser[0]) {
         throw new ApiError(404, "User not found")
@@ -97,26 +110,35 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
 
     const isMatch = await verifyPassword(password, existingUser[0].passwordHash)
     if (!isMatch) {
+        const key = `login:attempts:${email}`
+        const [[, count]] = await redisClient.multi().incr(key).expire(key, 120).exec() as any
+        if (count > 5) {
+            throw new ApiError(429, "Too many attempts. Please try again after 2 mins.")
+        }
+    }
+
+    if (!isMatch) {
         throw new ApiError(403, "Wrong credentials")
     }
 
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(existingUser[0].id)
+    await redisClient.del(`login:attempts:${email}`)
 
-    const { passwordHash,  ...loggedInUser } = existingUser[0]
+    const { passwordHash, ...loggedInUser } = existingUser[0]
 
-const accessTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
-}
+    const accessTokenOptions: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+    }
 
-const refreshTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
-}
+    const refreshTokenOptions: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+    }
 
     const res1 = res.status(200)
         .cookie("accessToken", accessToken, accessTokenOptions)
@@ -124,6 +146,7 @@ const refreshTokenOptions: CookieOptions = {
 
     return res1.json(new ApiResponse(200, { loggedInUser }, "User logged in successfully"))
 })
+
 export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
     const incomingToken = req.cookies?.refreshToken || req.body?.refreshToken || req.header('Authorization')?.replace("Bearer ", "")
 
@@ -131,21 +154,31 @@ export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
     if (!incomingToken) {
         throw new ApiError(401, "Unauthorized _ refresh token is missing")
     }
+    const accessToken = req.cookies?.accessToken
+    if (accessToken) {
+        const decoded = jwt.decode(accessToken) as { exp?: number } | null
+        if (decoded?.exp) {
+            const remainingSeconds = decoded.exp - Math.floor(Date.now() / 1000)
+            if (remainingSeconds > 0) {
+                await redisClient.set(`blacklist:${hashToken(accessToken)}`, "1", "EX", remainingSeconds)
+            }
+        }
+    }
     await db.delete(refreshTokens).where(eq(refreshTokens.token, hashToken(incomingToken)))
 
-const accessTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
-}
+    const accessTokenOptions: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+    }
 
-const refreshTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
-}
+    const refreshTokenOptions: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+    }
     return res.status(200)
         .clearCookie("accessToken", accessTokenOptions)
         .clearCookie("refreshToken", refreshTokenOptions)
@@ -178,18 +211,18 @@ export const refreshAccessToken = asyncHandler(async (req: Request, res: Respons
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(userId)
 
     const accessTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
-}
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+    }
 
-const refreshTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
-}
+    const refreshTokenOptions: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+    }
 
     return res.status(200)
         .cookie("accessToken", accessToken, accessTokenOptions)
@@ -199,13 +232,25 @@ const refreshTokenOptions: CookieOptions = {
 
 export const verifyEmail = asyncHandler(async (req, res) => {
     const { otp, email } = req.body  // ← email from body, no req.user
+    const ip = req.ip;
 
+    const key = `verify:attempts:${email}`
+    const [[, count]] = await redisClient.multi().incr(key).expire(key, 15 * 60).exec() as any
+
+    if (count === 1) {
+        await redisClient.expire(key, 60)
+    }
+
+    if (count > 5) {
+        await redisClient.del(verifyOtpKey(email))
+        throw new ApiError(429, "Too many attempts. Please request a new OTP.")
+    }
     const userArr = await db.select().from(users).where(eq(users.email, email))
     const user = userArr[0]
 
     if (!user) throw new ApiError(404, "User not found")
     if (user.isVerified) throw new ApiError(400, "User already verified")
-        
+
     const storedOtp = await redisClient.get(verifyOtpKey(email))
     if (!storedOtp || storedOtp !== otp) {
         throw new ApiError(400, "Invalid OTP")
@@ -215,27 +260,27 @@ export const verifyEmail = asyncHandler(async (req, res) => {
         isVerified: true,
     }).where(eq(users.email, email))  // ← use email not userId
 
-    await redisClient.del(verifyOtpKey(email))  // ← delete OTP from Redis after successful verification
-
+    await redisClient.del(verifyOtpKey(email))
+    await redisClient.del(key)   // ← reset attempts on success
     const { accessToken, refreshToken } = await generateAccessAndRefreshToken(user.id)
 
-    const { passwordHash,  ...loggedInUser } = user
+    const { passwordHash, ...loggedInUser } = user
 
     const finalUser = { ...loggedInUser, isVerified: true }
 
     const accessTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
-}
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 15 * 60 * 1000 // 15 minutes — match ACCESS_TOKEN_EXPIRY
+    }
 
-const refreshTokenOptions: CookieOptions = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
-}
+    const refreshTokenOptions: CookieOptions = {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days — match REFRESH_TOKEN_EXPIRY
+    }
 
     return res.status(200)
         .cookie("accessToken", accessToken, accessTokenOptions)
@@ -244,8 +289,13 @@ const refreshTokenOptions: CookieOptions = {
 })
 
 export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Response) => {
-    const { email } = req.body  // ← email from body, no req.user
-    console.log(email)
+    const { email } = req.body  
+    const coolDownKey = `otp:resend:cooldown:${email}`
+
+    const alreadyOnCoolDown = await redisClient.get(coolDownKey)
+    if (alreadyOnCoolDown) {
+        throw new ApiError(429 , "Please wait before requesting another OTP")
+    }
 
     const checkUserExistArr = await db.select().from(users).where(eq(users.email, email))
     const user = checkUserExistArr[0]
@@ -256,6 +306,7 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
 
     await redisClient.set(verifyOtpKey(email), otp, 'EX', 10 * 60)  // ← store OTP in Redis with expiry
+    await redisClient.del(`verify:attempts:${email}`)
 
     const mailOptions = {
         from: process.env.SENDER_EMAIL,
@@ -266,6 +317,7 @@ export const resendVerifyOtpForEmail = asyncHandler(async (req: Request, res: Re
 
     try {
         await transporter.sendMail(mailOptions)
+        await redisClient.set(coolDownKey, "1" , "EX", 60)
     } catch (emailError) {
         throw new ApiError(500, "Failed to send OTP email — please try again")
     }
@@ -357,7 +409,7 @@ export const sendResetPasswordOTP = asyncHandler(async (req: Request, res: Respo
     }
 
     const otp = String(Math.floor(100000 + Math.random() * 900000))
-    await redisClient.set(resetOtpKey(email), otp, 'EX', 10 * 60)  
+    await redisClient.set(resetOtpKey(email), otp, 'EX', 10 * 60)
 
     const mailOptions = {
         from: process.env.SENDER_EMAIL,
@@ -421,6 +473,7 @@ export const searchUserByEmail = asyncHandler(async (req: Request, res: Response
     return res.status(200).json(new ApiResponse(200, usersEmailArr[0], "User fetched successfuly"))
 
 })
+
 export const getMe = asyncHandler(async (req, res) => {
     const userId = req.user!.id
 
