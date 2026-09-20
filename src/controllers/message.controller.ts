@@ -122,89 +122,111 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = (page - 1) * limit;
 
+    // ── participants: reuse the same cache from insertMessage ──
+    const participantsCacheKey = `conversation:participants:${conversationId}`
+    const cachedParticipants = await redisClient.get(participantsCacheKey)
 
-    const participant = await db.select()
-        .from(conversationParticipants)
-        .where(
-            and(
-                eq(conversationParticipants.conversationId, conversationId),
-                eq(conversationParticipants.userId, senderId)
-            )
-        )
-
-    if (!participant[0]) {
-        throw new ApiError(403, "You are not a participant of this conversation")
+    let participantsArr: { userId: string }[]
+    if (cachedParticipants) {
+        participantsArr = JSON.parse(cachedParticipants)
+    } else {
+        participantsArr = await db.select({ userId: conversationParticipants.userId })
+            .from(conversationParticipants)
+            .where(eq(conversationParticipants.conversationId, conversationId))
+        await redisClient.set(participantsCacheKey, JSON.stringify(participantsArr), 'EX', 60 * 60 * 24)
     }
 
-    const otherParticipantArr = await db.select().from(conversationParticipants).where(and(
-        eq(conversationParticipants.conversationId, conversationId),
-        ne(conversationParticipants.userId, senderId)
-    ))
-    const otherParticipantId = otherParticipantArr[0].userId
+    if (participantsArr.length === 0) throw new ApiError(404, "Conversation not found")
+
+    const isParticipant = participantsArr.some(p => p.userId === senderId)
+    if (!isParticipant) throw new ApiError(403, "You are not a participant of this conversation")
+
+    const otherParticipant = participantsArr.find(p => p.userId !== senderId)
+    if (!otherParticipant) throw new ApiError(404, "Other participant not found")
+    const otherParticipantId = otherParticipant.userId
+
+    // ── presence: pure Redis, no DB involved ──
     const otherParticipantPresence = await redisClient.hgetall(`presence:${otherParticipantId}`)
 
-    const isBlockedArr = await db.select().from(blockedUsers).where(
-        or(
-            and(
-                eq(blockedUsers.blockerId, senderId),
-                eq(blockedUsers.blockedId, otherParticipantId)
-            ),
-            and(
-                eq(blockedUsers.blockerId, otherParticipantId),
-                eq(blockedUsers.blockedId, senderId)
-            ),
-        )
-    )
-    const isBlocked = isBlockedArr[0]
+    // ── blocked status: symmetric key, short TTL, invalidated on block/unblock ──
+    const blockCacheKey = `blocked:${[senderId, otherParticipantId].sort().join(':')}`
+    const cachedBlock = await redisClient.get(blockCacheKey)
 
-
-
-    const conversationMessages = await db
-        .select({
-            id: messages.id,
-            content: messages.content,
-            mediaUrl: messages.mediaUrl,
-            type: messages.type,
-            isDeleted: messages.isDeleted,
-            replyToId: messages.replyToId,
-            createdAt: messages.createdAt,
-            senderId: messages.senderId,
-
-            senderUsername: users.username,
-            senderAvatar: users.avatarUrl,
-            nickname: contacts.nickname,
-        })
-        .from(messages)
-        .innerJoin(
-            users,
-            eq(messages.senderId, users.id)
-        )
-        .leftJoin(contacts,
-            and(
-                eq(contacts.ownerId, senderId),
-                eq(contacts.contactId, users.id)
+    let isBlocked: boolean
+    if (cachedBlock !== null) {
+        isBlocked = cachedBlock === "true"
+    } else {
+        const isBlockedArr = await db.select().from(blockedUsers).where(
+            or(
+                and(eq(blockedUsers.blockerId, senderId), eq(blockedUsers.blockedId, otherParticipantId)),
+                and(eq(blockedUsers.blockerId, otherParticipantId), eq(blockedUsers.blockedId, senderId)),
             )
         )
-        .where(eq(messages.conversationId, conversationId))
-        .orderBy(messages.createdAt)  // oldest first like WhatsApp
-        .limit(limit)
-        .offset(offset)
+        isBlocked = !!isBlockedArr[0]
+        await redisClient.set(blockCacheKey, String(isBlocked), 'EX', 300)
+    }
 
+    // ── messages: cache only "closed" pages, never the newest/last page ──
+    const messagesCacheKey = `messages:${conversationId}:page:${page}:limit:${limit}`
+    const cachedMessages = await redisClient.get(messagesCacheKey)
 
-    // get total count for frontend to know total pages
-    const totalMessages = await db
-        .select({ count: count() })
-        .from(messages)
-        .where(eq(messages.conversationId, conversationId))
+    let conversationMessages
+    let total: number
 
+    if (cachedMessages) {
+        const parsed = JSON.parse(cachedMessages)
+        conversationMessages = parsed.messages
+        total = parsed.total
+    } else {
+        conversationMessages = await db
+            .select({
+                id: messages.id,
+                content: messages.content,
+                mediaUrl: messages.mediaUrl,
+                type: messages.type,
+                isDeleted: messages.isDeleted,
+                replyToId: messages.replyToId,
+                createdAt: messages.createdAt,
+                senderId: messages.senderId,
+                senderUsername: users.username,
+                senderAvatar: users.avatarUrl,
+                nickname: contacts.nickname,
+            })
+            .from(messages)
+            .innerJoin(users, eq(messages.senderId, users.id))
+            .leftJoin(contacts, and(eq(contacts.ownerId, senderId), eq(contacts.contactId, users.id)))
+            .where(eq(messages.conversationId, conversationId))
+            .orderBy(messages.createdAt)
+            .limit(limit)
+            .offset(offset)
 
-    const total = totalMessages[0].count
-    const totalPages = Math.ceil(Number(total) / limit)
+        const totalMessages = await db
+            .select({ count: count() })
+            .from(messages)
+            .where(eq(messages.conversationId, conversationId))
+
+        total = Number(totalMessages[0].count)
+
+        const totalPagesCheck = Math.ceil(total / limit)
+        const isLastPage = page >= totalPagesCheck
+
+        // only cache pages that are "closed" — the last page will change as new
+        // messages arrive, so caching it would show stale data immediately
+        if (!isLastPage) {
+            await redisClient.set(
+                messagesCacheKey,
+                JSON.stringify({ messages: conversationMessages, total }),
+                'EX', 60 * 60 * 24 // long TTL — closed pages never change
+            )
+        }
+    }
+
+    const totalPages = Math.ceil(total / limit)
 
     return res.status(200).json(
         new ApiResponse(200, {
             messages: conversationMessages,
-            isBlocked: isBlocked ? true : false,
+            isBlocked,
             otherParticipant: {
                 isOnline: otherParticipantPresence.status === "online",
                 lastSeen: otherParticipantPresence.lastSeen
@@ -218,7 +240,6 @@ export const getMessages = asyncHandler(async (req: Request, res: Response) => {
             }
         }, "Messages fetched successfully")
     )
-
 })
 
 export const getConversations = asyncHandler(async (req: Request, res: Response) => {
